@@ -309,7 +309,7 @@ sweep_red() {
 # write_run_summary <mode> <fees_usd> <grt> <wbtc> <red> <weth_swapped_usd> <burn_note>
 RUNS_FILE="$PROJECT_DIR/runs.md"
 write_run_summary() {
-  local mode="$1" fees="$2" grt="$3" wbtc="$4" red="$5" weth="$6" burn="${7:-}"
+  local mode="$1" fees="$2" grt="$3" wbtc="$4" link="$5" clawd="$6" red="$7" weth="$8" burn="${9:-}"
   local ts
   ts="$(date -u '+%Y-%m-%d %H:%M UTC')"
   # Create file with header if it doesn't exist
@@ -317,11 +317,11 @@ write_run_summary() {
     cat > "$RUNS_FILE" <<'EOF'
 # RedBotster Run History
 
-| Time (UTC) | Mode | Fees Claimed | GRT | WBTC | RED | WETH Swapped | Burn |
-|---|---|---|---|---|---|---|---|
+| Time (UTC) | Mode | Fees Claimed | GRT | WBTC | LINK | CLAWD | RED | WETH Swapped | Burn |
+|---|---|---|---|---|---|---|---|---|---|
 EOF
   fi
-  echo "| $ts | $mode | \$$fees | $grt | $wbtc | $red | \$$weth | $burn |" >> "$RUNS_FILE"
+  echo "| $ts | $mode | \$$fees | $grt | $wbtc | $link | $clawd | $red | $weth | $burn |" >> "$RUNS_FILE"
 }
 
 # Append a summary line to ~/RedBotster.md
@@ -361,7 +361,7 @@ if [ "$NO_FEES" = "true" ]; then
   sweep_red
   weth_allocation_swap
   update_tracker "No fees this run — RED swept + WETH 5% allocation swap run"
-  write_run_summary "no-fees" "0" "-" "-" "-" "$(echo "${WETH_FALLBACK_MIN}" | awk '{printf "%.2f", $1}')" "-"
+  write_run_summary "no-fees" "0" "-" "-" "-" "-" "-" "5% of WETH" "-"
   log_section "DONE (no fees)"
   exit 0
 fi
@@ -379,7 +379,7 @@ else
     sweep_red
     weth_allocation_swap
     update_tracker "Fees below threshold (\$$AVAILABLE_USD) — RED swept + WETH 5% swap run"
-    write_run_summary "below-threshold" "$AVAILABLE_USD" "-" "-" "-" "5% of WETH" "-"
+    write_run_summary "below-threshold" "$AVAILABLE_USD" "-" "-" "-" "-" "-" "5% of WETH" "-"
     log_section "DONE (below threshold)"
     exit 0
   fi
@@ -525,6 +525,7 @@ RED_DISPLAY="${RED_AMOUNT_RAW:-unknown}"
 
 # Check if burn threshold met (>10% of total supply)
 BURN_ELIGIBLE="no"
+BURN_PCT="0"
 BURN_RESPONSE="Accumulating RED — burn threshold not reached"
 if [ "$DRY_RUN" = "true" ]; then
   log "[DRY RUN] Would check RED burn threshold — skipping"
@@ -614,7 +615,7 @@ log_section "Step 8: Update tracker"
 BURN_NOTE=$([ "$BURN_ELIGIBLE" = "true" ] && echo "BURNED ${RED_DISPLAY}" || echo "accumulating")
 SUMMARY="Claimed \$$CLAIMED_USD fees → GRT: ${GRT_DISPLAY} | WBTC: ${WBTC_DISPLAY} | LINK: ${LINK_DISPLAY} | CLAWD: ${CLAWD_DISPLAY} | RED: ${RED_DISPLAY} (${BURN_NOTE})"
 update_tracker "$SUMMARY"
-write_run_summary "fee-claim" "$CLAIMED_USD" "${GRT_DISPLAY}" "${WBTC_DISPLAY}" "${RED_DISPLAY}" "5% of WETH" "$BURN_NOTE"
+write_run_summary "fee-claim" "$CLAIMED_USD" "${GRT_DISPLAY}" "${WBTC_DISPLAY}" "${LINK_DISPLAY}" "${CLAWD_DISPLAY}" "${RED_DISPLAY}" "5% of WETH" "$BURN_NOTE"
 log "Tracker updated."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
