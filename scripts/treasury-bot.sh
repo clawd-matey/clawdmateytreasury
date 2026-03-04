@@ -5,6 +5,7 @@
 #   1. Check fees via `bankr fees <wallet>`
 #   2. If above threshold, claim via Bankr natural language
 #   3. Split into portfolio: 20% each RED/WBTC/CLAWD/YARR + 20% WETH reserve
+#   4. Send all tokens to clawd-matey.eth (public treasury)
 #
 # Usage: ./treasury-bot.sh [--dry-run]
 
@@ -14,6 +15,9 @@ set -euo pipefail
 CREATOR_WALLET="0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633"
 YARR_TOKEN="0x309792e8950405f803c0e3f2c9083bdff4466ba3"
 MIN_THRESHOLD_USD=10
+
+# Public treasury wallet (clawd-matey.eth)
+TREASURY_WALLET="0xdb784e1Dce8b11CC45b5228E9Ae48B03bDeFD1D9"
 
 # Portfolio tokens (all Base native)
 RED_TOKEN="0x2e662015a501f066e043d64d04f77ffe551a4b07"
@@ -112,5 +116,15 @@ Execute all 4 transactions. Use Clanker pools where available. Report results." 
   log "Batch buy result: $(echo "$BUY_RESULT" | tail -10)"
 fi
 
+# ── Step 6: Transfer tokens to public treasury (clawd-matey.eth) ──────────────
+if [ "$DRY_RUN" = "true" ]; then
+  log "[DRY RUN] Would transfer all tokens to clawd-matey.eth ($TREASURY_WALLET)"
+else
+  log "Transferring tokens to public treasury (clawd-matey.eth)..."
+  TRANSFER_RESULT=$(bankr "Send all my RED, WBTC, CLAWD, and YARR tokens on Base to $TREASURY_WALLET (clawd-matey.eth). Keep WETH for gas. Execute all transfers." 2>&1 || true)
+  log "Transfer result: $(echo "$TRANSFER_RESULT" | tail -10)"
+fi
+
 log "═══ TREASURY BOT COMPLETE ═══"
 log "Claimed: \$$CLAIMED_USD | Swapped: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
+log "Tokens sent to clawd-matey.eth"

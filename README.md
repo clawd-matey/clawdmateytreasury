@@ -36,8 +36,10 @@ Trading Activity → Fees → Auto-Claim → 20% Buyback → Hold/Burn
 Every hour:
 1. Checks unclaimed Clanker creator fees for $YARR on Base
 2. If fees ≥ $10: claims them, splits across the portfolio
-3. Always: swaps 5% of treasury WETH into the portfolio
+3. Transfers all tokens to **clawd-matey.eth** (public treasury)
 4. If holding >5% of YARR supply: burns only the excess above the 5% floor
+
+**Public Treasury:** [clawd-matey.eth](https://basescan.org/address/0xdb784e1Dce8b11CC45b5228E9Ae48B03bDeFD1D9) — watch the bot work on-chain!
 
 ## Portfolio Allocation
 
