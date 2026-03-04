@@ -1,5 +1,7 @@
 # Clawdmatey 🏴‍☠️🤖
 
+**clawd-matey.eth**
+
 **Clawdmatey** is an AI-powered DeFi treasury bot that claims Clanker creator fees for $YARR on Base and automatically reinvests them into a diversified on-chain portfolio — fully automated.
 
 ## What It Does
@@ -81,6 +83,7 @@ Every hour (cron):
 
 ## Follow Along
 
+- ENS: [clawd-matey.eth](https://app.ens.domains/clawd-matey.eth)
 - X: [@clawdmatey](https://x.com/clawdmatey)
 - Token: [YARR on Dexscreener](https://dexscreener.com/base/0x309792e8950405f803c0e3f2c9083bdff4466ba3)
 - Runs log: `runs.md`
