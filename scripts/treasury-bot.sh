@@ -128,33 +128,44 @@ fi
 
 # ── Step 5: Check treasury YARR balance and burn if > 5% supply ───────────────
 YARR_BURNED="0"
+
+# Direct RPC call for balance (instant, no LLM needed)
+get_erc20_balance() {
+  local TOKEN=$1
+  local WALLET=$2
+  # balanceOf(address) selector = 0x70a08231
+  local PADDED_ADDR=$(printf '%064s' "${WALLET:2}" | tr ' ' '0')
+  local HEX=$(curl -s -X POST "https://mainnet.base.org" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231$PADDED_ADDR\"},\"latest\"],\"id\":1}" \
+    | grep -oE '"result":"0x[0-9a-fA-F]+"' | cut -d'"' -f4)
+  # Use python for reliable hex conversion
+  python3 -c "print(int('${HEX}', 16) // 10**18)" 2>/dev/null || echo "0"
+}
+
+get_erc20_supply() {
+  local TOKEN=$1
+  # totalSupply() selector = 0x18160ddd
+  local HEX=$(curl -s -X POST "https://mainnet.base.org" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"$TOKEN\",\"data\":\"0x18160ddd\"},\"latest\"],\"id\":1}" \
+    | grep -oE '"result":"0x[0-9a-fA-F]+"' | cut -d'"' -f4)
+  python3 -c "print(int('${HEX}', 16) // 10**18)" 2>/dev/null || echo "1000000000"
+}
+
 if [ "$DRY_RUN" = "true" ]; then
   log "[DRY RUN] Would check treasury YARR balance vs 5% supply threshold"
 else
-  log "Checking treasury YARR balance vs supply threshold..."
+  log "Checking treasury YARR balance via direct RPC..."
   
-  # Get TREASURY YARR balance and total supply via Bankr
-  YARR_CHECK=$(bankr "Check the YARR token balance for wallet $TREASURY_WALLET on Base (token: $YARR_TOKEN). Also tell me the total supply. Format: BALANCE: <number> SUPPLY: <number>" 2>&1 || true)
-  log "YARR check: $(echo "$YARR_CHECK" | tail -10)"
+  YARR_BALANCE=$(get_erc20_balance "$YARR_TOKEN" "$TREASURY_WALLET")
+  YARR_SUPPLY=$(get_erc20_supply "$YARR_TOKEN")
   
-  # Try multiple parsing strategies
-  # Strategy 1: Look for explicit BALANCE/SUPPLY format
-  YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "balance[:\s]*[0-9,.]+" | grep -oE "[0-9,.]+" | tr -d ',' | head -1 || echo "")
-  YARR_SUPPLY=$(echo "$YARR_CHECK" | grep -oiE "supply[:\s]*[0-9,.]+" | grep -oE "[0-9,.]+" | tr -d ',' | head -1 || echo "")
+  log "Treasury YARR: $YARR_BALANCE / $YARR_SUPPLY supply"
   
-  # Strategy 2: Look for numbers followed by YARR
-  if [ -z "$YARR_BALANCE" ]; then
-    YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "[0-9,]+\.?[0-9]*\s*yarr" | head -1 | grep -oE "^[0-9,.]+" | tr -d ',' || echo "0")
-  fi
-  
-  # Strategy 3: Default supply to 1B if not found (standard Clanker supply)
-  if [ -z "$YARR_SUPPLY" ]; then
-    YARR_SUPPLY="1000000000"
-    log "Using default supply: 1B YARR"
-  fi
-  
-  # Ensure we have numbers
-  [ -z "$YARR_BALANCE" ] && YARR_BALANCE="0"
+  # Fallback if parsing failed
+  [ -z "$YARR_BALANCE" ] || [ "$YARR_BALANCE" = "0" ] && YARR_BALANCE="0"
+  [ -z "$YARR_SUPPLY" ] || [ "$YARR_SUPPLY" = "0" ] && YARR_SUPPLY="1000000000"
   
   if [ "$YARR_BALANCE" != "0" ] && [ "$YARR_SUPPLY" != "0" ]; then
     # Calculate percentage
