@@ -26,6 +26,14 @@ SWAP_SCRIPT="$SCRIPT_DIR/uniswap-swap.py"
 # Primary token: YARR (fees come from this)
 YARR_TOKEN="0x309792e8950405f803c0e3f2c9083bdff4466ba3"
 
+# Clanker FeeLocker (v4 only - YARR is v3, needs Bankr fallback)
+CLANKER_FEE_LOCKER="0xF3622742b1E446D92e45E22923Ef11C2fcD55D68"
+CLANKER_FEES_SCRIPT="$SCRIPT_DIR/clanker-fees.py"
+
+# Fee claiming mode: "direct" (v4) or "bankr" (v3 fallback)
+# YARR is v3, so we use Bankr for now
+FEE_CLAIM_MODE="bankr"
+
 # Portfolio tokens
 RED_TOKEN_BASE="0x2e662015a501f066e043d64d04f77ffe551a4b07"
 GRT_TOKEN_ARB="0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
@@ -277,11 +285,26 @@ log "ETH price: \$$ETH_PRICE"
 # ── Step 1: Check YARR fee balance ────────────────────────────────────────────
 log_section "Step 1: Check Clanker fee balance for YARR"
 
-CHECK_RESULT=$(bankr_run "Check my current unclaimed Clanker creator fee balance for YARR token ($YARR_TOKEN) on Base. Show me the total USD value available to claim.")
-CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "Response: $CHECK_RESPONSE"
+# Try direct check first (v4), fall back to Bankr (v3)
+AVAILABLE_USD=""
+if [ "$FEE_CLAIM_MODE" = "direct" ] && [ -f "$CLANKER_FEES_SCRIPT" ]; then
+  log "Attempting direct fee check (v4)..."
+  FEE_OWNER="${YARR_CREATOR:-0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633}"
+  CHECK_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" check --fee-owner "$FEE_OWNER" --token YARR 2>>"$LOGFILE") || true
+  CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+  AVAILABLE_USD=$(echo "$CHECK_RESULT" | jq -r '.data.total_usd // 0' 2>/dev/null || echo "0")
+  log "Direct check result: \$$AVAILABLE_USD"
+fi
 
-AVAILABLE_USD=$(parse_usd "$CHECK_RESPONSE")
+# Fall back to Bankr for v3 tokens
+if [ -z "$AVAILABLE_USD" ] || [ "$AVAILABLE_USD" = "0" ] || [ "$FEE_CLAIM_MODE" = "bankr" ]; then
+  log "Using Bankr for fee check (v3 token)..."
+  CHECK_RESULT=$(bankr_run "Check my current unclaimed Clanker creator fee balance for YARR token ($YARR_TOKEN) on Base. Show me the total USD value available to claim.")
+  CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+  log "Bankr response: $CHECK_RESPONSE"
+  AVAILABLE_USD=$(parse_usd "$CHECK_RESPONSE")
+fi
+
 log "Parsed available: \$$AVAILABLE_USD"
 
 NO_FEES=false
@@ -317,11 +340,31 @@ log "\$$AVAILABLE_USD >= threshold \$$MIN_THRESHOLD — proceeding."
 # ── Step 3: Claim fees ────────────────────────────────────────────────────────
 log_section "Step 3: Claim YARR Clanker fees"
 
-CLAIM_RESULT=$(bankr_run "Claim ALL unclaimed Clanker creator fees for YARR ($YARR_TOKEN) on Base. After claiming, swap any non-WETH tokens to WETH. Tell me the total USD value claimed.")
-CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "Claim response: $CLAIM_RESPONSE"
+CLAIMED_USD=""
 
-CLAIMED_USD=$(parse_usd "$CLAIM_RESPONSE")
+# Try direct claim first (v4), fall back to Bankr (v3)
+if [ "$FEE_CLAIM_MODE" = "direct" ] && [ -f "$CLANKER_FEES_SCRIPT" ]; then
+  log "Attempting direct fee claim (v4)..."
+  FEE_OWNER="${YARR_CREATOR:-0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633}"
+  if [ "$DRY_RUN" = "true" ]; then
+    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$FEE_OWNER" --token YARR --dry-run 2>>"$LOGFILE") || true
+  else
+    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$FEE_OWNER" --token YARR 2>>"$LOGFILE") || true
+  fi
+  CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+  CLAIMED_USD=$(echo "$CLAIM_RESULT" | jq -r '.data.total_usd // 0' 2>/dev/null || echo "0")
+  log "Direct claim result: \$$CLAIMED_USD"
+fi
+
+# Fall back to Bankr for v3 tokens
+if [ -z "$CLAIMED_USD" ] || [ "$CLAIMED_USD" = "0" ] || [ "$FEE_CLAIM_MODE" = "bankr" ]; then
+  log "Using Bankr for fee claim (v3 token)..."
+  CLAIM_RESULT=$(bankr_run "Claim ALL unclaimed Clanker creator fees for YARR ($YARR_TOKEN) on Base. After claiming, swap any non-WETH tokens to WETH. Tell me the total USD value claimed.")
+  CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+  log "Bankr claim response: $CLAIM_RESPONSE"
+  CLAIMED_USD=$(parse_usd "$CLAIM_RESPONSE")
+fi
+
 if [ -z "$CLAIMED_USD" ]; then
   CLAIMED_USD="${AVAILABLE_USD:-0}"
   log "Could not parse claimed amount — using estimate: \$$CLAIMED_USD"
