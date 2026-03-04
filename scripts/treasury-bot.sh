@@ -73,11 +73,18 @@ fi
 CLAIMABLE_USD=$(echo "$CLAIMABLE_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
 log "Claimable: $CLAIMABLE_WETH WETH (\$$CLAIMABLE_USD)"
 
-# ── Step 2: Threshold check ───────────────────────────────────────────────────
-ABOVE_THRESHOLD=$(echo "$CLAIMABLE_USD $MIN_THRESHOLD_USD" | awk '{print ($1 >= $2) ? "yes" : "no"}')
+# ── Step 2: Check for ANY claimable fees (WETH or YARR) ───────────────────────
+# Parse YARR fees too (shown separately in bankr fees output)
+CLAIMABLE_YARR=$(echo "$FEES_OUTPUT" | grep -oiE "[0-9,]+\.?[0-9]*\s*yarr" | head -1 | tr -d ',' | grep -oE "^[0-9.]+" || echo "0")
+[ -z "$CLAIMABLE_YARR" ] && CLAIMABLE_YARR="0"
+log "Claimable YARR: $CLAIMABLE_YARR"
 
-if [ "$ABOVE_THRESHOLD" = "no" ]; then
-  log "Below threshold (\$$CLAIMABLE_USD < \$$MIN_THRESHOLD_USD) — skipping"
+# Proceed if WETH above threshold OR significant YARR available
+ABOVE_THRESHOLD=$(echo "$CLAIMABLE_USD $MIN_THRESHOLD_USD" | awk '{print ($1 >= $2) ? "yes" : "no"}')
+HAS_YARR=$(echo "$CLAIMABLE_YARR" | awk '{print ($1 > 1000000) ? "yes" : "no"}')  # >1M YARR
+
+if [ "$ABOVE_THRESHOLD" = "no" ] && [ "$HAS_YARR" = "no" ]; then
+  log "Below threshold (WETH: \$$CLAIMABLE_USD < \$$MIN_THRESHOLD_USD, YARR: $CLAIMABLE_YARR) — skipping"
   log "═══ DONE (below threshold) ═══"
   exit 0
 fi
@@ -103,15 +110,31 @@ fi
 CLAIMED_USD=$(echo "$CLAIMED_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
 log "Claimed WETH: \$$CLAIMED_USD"
 
-# ── Step 4: Check YARR balance and burn if > 5% supply ────────────────────────
+# ── Step 4: Transfer claimed YARR to treasury ─────────────────────────────────
+YARR_TRANSFERRED="0"
+if [ "$DRY_RUN" = "true" ]; then
+  log "[DRY RUN] Would transfer claimed YARR to treasury"
+else
+  log "Transferring all YARR to treasury (clawd-matey.eth)..."
+  YARR_TRANSFER=$(bankr "Send all my YARR ($YARR_TOKEN) on Base to $TREASURY_WALLET (clawd-matey.eth). Execute the transfer." 2>&1 || true)
+  
+  if echo "$YARR_TRANSFER" | grep -qiE "(tx|transaction|hash|success|sent|0x[a-f0-9]{64})"; then
+    log "✅ YARR transferred to treasury"
+    YARR_TRANSFERRED="yes"
+  else
+    log "⚠️ YARR transfer may have failed: $(echo "$YARR_TRANSFER" | tail -3)"
+  fi
+fi
+
+# ── Step 5: Check treasury YARR balance and burn if > 5% supply ───────────────
 YARR_BURNED="0"
 if [ "$DRY_RUN" = "true" ]; then
-  log "[DRY RUN] Would check YARR balance vs 5% supply threshold"
+  log "[DRY RUN] Would check treasury YARR balance vs 5% supply threshold"
 else
-  log "Checking YARR balance vs supply threshold..."
+  log "Checking treasury YARR balance vs supply threshold..."
   
-  # Get wallet YARR balance and total supply via Bankr
-  YARR_CHECK=$(bankr "Check my YARR token balance on Base (token: $YARR_TOKEN). Also tell me the total supply. Format: BALANCE: <number> SUPPLY: <number>" 2>&1 || true)
+  # Get TREASURY YARR balance and total supply via Bankr
+  YARR_CHECK=$(bankr "Check the YARR token balance for wallet $TREASURY_WALLET on Base (token: $YARR_TOKEN). Also tell me the total supply. Format: BALANCE: <number> SUPPLY: <number>" 2>&1 || true)
   log "YARR check: $(echo "$YARR_CHECK" | tail -10)"
   
   # Try multiple parsing strategies
@@ -166,7 +189,7 @@ else
   fi
 fi
 
-# ── Step 5: Calculate splits (25% each: RED, WBTC, CLAWD, WETH reserve) ───────
+# ── Step 6: Calculate splits (25% each: RED, WBTC, CLAWD, WETH reserve) ───────
 # Using only WETH for diversification (YARR is accumulated separately)
 TOTAL_WETH="$CLAIMED_WETH"
 TOTAL_USD="$CLAIMED_USD"
@@ -175,7 +198,7 @@ SPLIT_USD=$(echo "$TOTAL_USD" | awk '{printf "%.2f", $1 / 4}')
 WETH_RESERVE=$(echo "$TOTAL_USD" | awk '{printf "%.2f", $1 * 0.25}')
 log "Split: \$$SPLIT_USD each to RED, WBTC, CLAWD | \$$WETH_RESERVE WETH reserve"
 
-# ── Step 6: Buy portfolio tokens (sequential, wait for each) ─────────────────
+# ── Step 7: Buy portfolio tokens (sequential, wait for each) ─────────────────
 buy_token() {
   local TOKEN_NAME=$1
   local TOKEN_ADDR=$2
@@ -225,7 +248,7 @@ else
   log "Buy summary: $BOUGHT/3 succeeded, $FAILED failed"
 fi
 
-# ── Step 7: Transfer tokens to public treasury (clawd-matey.eth) ──────────────
+# ── Step 8: Transfer tokens to public treasury (clawd-matey.eth) ──────────────
 transfer_token() {
   local TOKEN_NAME=$1
   local TOKEN_ADDR=$2
@@ -259,7 +282,7 @@ log "Claimed: $CLAIMED_WETH WETH + YARR (accumulated)"
 log "YARR burned: $YARR_BURNED | WETH diversified: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
 log "Tokens (RED, WBTC, CLAWD) sent to clawd-matey.eth"
 
-# ── Step 8: Update TRANSACTIONS.md and push to GitHub ─────────────────────────
+# ── Step 9: Update TRANSACTIONS.md and push to GitHub ─────────────────────────
 if [ "$DRY_RUN" = "false" ]; then
   REPO_DIR="$(dirname "$SCRIPT_DIR")"
   TX_LOG="$REPO_DIR/TRANSACTIONS.md"
@@ -284,8 +307,11 @@ if [ "$DRY_RUN" = "false" ]; then
     BURN_NOTE=" | 🔥 Burned: $YARR_BURNED YARR"
   fi
   
+  YARR_NOTE=""
+  [ "$YARR_TRANSFERRED" = "yes" ] && YARR_NOTE=" | YARR → treasury ✅"
+  
   ENTRY="### Run: $TIME
-**Claimed:** $CLAIMED_WETH WETH + YARR (accumulated)$BURN_NOTE  
+**Claimed:** $CLAIMED_WETH WETH + YARR$YARR_NOTE$BURN_NOTE  
 **WETH Split:** ~\$$TOTAL_USD → \$$SPLIT_USD each to RED/WBTC/CLAWD  
 **Claim Tx:** [${CLAIM_TX:0:9}...](https://basescan.org/tx/$CLAIM_TX)  
 **Buys:** $BOUGHT/3 | **Transfers:** $TRANSFERRED/3 | **Status:** $STATUS
