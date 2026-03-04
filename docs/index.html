@@ -165,6 +165,9 @@
             WBTC:  { addr: '0x0555E30da8f98308EdB960aa94C0Db47230d2B9c', decimals: 8 },
         };
 
+        // DexScreener API for token prices (Base chain)
+        const DEXSCREENER_BASE = 'https://api.dexscreener.com/latest/dex/tokens/';
+
         async function rpcCall(method, params) {
             const res = await fetch(RPC, {
                 method: 'POST',
@@ -191,6 +194,33 @@
             return BigInt(hex);
         }
 
+        async function getPrices() {
+            const prices = { ETH: 0, WBTC: 0, YARR: 0, RED: 0, CLAWD: 0 };
+            
+            try {
+                // ETH + BTC from CoinGecko
+                const cgRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum,bitcoin&vs_currencies=usd');
+                const cgData = await cgRes.json();
+                prices.ETH = cgData.ethereum?.usd || 0;
+                prices.WBTC = cgData.bitcoin?.usd || 0;
+            } catch (e) { console.log('CoinGecko error:', e); }
+
+            // Meme tokens from DexScreener
+            for (const [symbol, info] of Object.entries(TOKENS)) {
+                if (symbol === 'WBTC') continue; // Already have BTC price
+                try {
+                    const res = await fetch(DEXSCREENER_BASE + info.addr);
+                    const data = await res.json();
+                    const pair = data.pairs?.find(p => p.chainId === 'base');
+                    if (pair?.priceUsd) {
+                        prices[symbol] = parseFloat(pair.priceUsd);
+                    }
+                } catch (e) { console.log(`DexScreener error for ${symbol}:`, e); }
+            }
+
+            return prices;
+        }
+
         function formatNum(n, decimals = 2) {
             if (n >= 1e9) return (n / 1e9).toFixed(decimals) + 'B';
             if (n >= 1e6) return (n / 1e6).toFixed(decimals) + 'M';
@@ -198,16 +228,30 @@
             return n.toFixed(decimals);
         }
 
+        function formatUsd(n) {
+            if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+            if (n >= 1) return '$' + n.toFixed(2);
+            return '$' + n.toFixed(4);
+        }
+
         async function loadData() {
             try {
                 const holdings = [];
-                let totalEst = 0;
+                let totalUsd = 0;
+
+                // Get prices first
+                const prices = await getPrices();
 
                 // Get ETH balance
                 const ethBal = await getEthBalance(TREASURY);
                 const ethNum = Number(ethBal) / 1e18;
+                const ethUsd = ethNum * prices.ETH;
+                totalUsd += ethUsd;
                 document.getElementById('eth-balance').textContent = ethNum.toFixed(4) + ' ETH';
-                totalEst += ethNum * 2100; // rough ETH price
+                if (prices.ETH > 0) {
+                    document.getElementById('eth-balance').textContent += ` (${formatUsd(ethUsd)})`;
+                }
 
                 // Get token balances
                 for (const [symbol, info] of Object.entries(TOKENS)) {
@@ -215,28 +259,34 @@
                     const supply = await getTotalSupply(info.addr);
                     const balNum = Number(bal) / (10 ** info.decimals);
                     const pct = supply > 0 ? (Number(bal) / Number(supply) * 100) : 0;
+                    const price = prices[symbol] || 0;
+                    const usdValue = balNum * price;
+                    totalUsd += usdValue;
 
-                    holdings.push({ symbol, balance: balNum, pct });
+                    holdings.push({ symbol, balance: balNum, pct, price, usdValue });
 
                     if (symbol === 'YARR') {
                         document.getElementById('yarr-pct').textContent = pct.toFixed(2) + '%';
                     }
                 }
 
-                // Render holdings
+                // Render holdings with USD values
                 const holdingsHtml = holdings.map(h => `
                     <div class="token-row">
                         <div>
                             <span class="token-name">${h.symbol}</span>
                             <span class="token-pct">${h.pct.toFixed(4)}% supply</span>
                         </div>
-                        <span class="token-balance">${formatNum(h.balance)}</span>
+                        <div style="text-align: right;">
+                            <span class="token-balance">${formatNum(h.balance)}</span>
+                            ${h.usdValue > 0 ? `<div style="color: var(--green); font-size: 0.875rem;">${formatUsd(h.usdValue)}</div>` : ''}
+                        </div>
                     </div>
                 `).join('');
                 document.getElementById('holdings').innerHTML = holdingsHtml;
 
-                // Rough total estimate (just ETH for now, tokens need price feeds)
-                document.getElementById('total-value').textContent = '$' + formatNum(totalEst, 0) + '+';
+                // Total USD value
+                document.getElementById('total-value').textContent = formatUsd(totalUsd);
 
                 document.getElementById('update-time').textContent = new Date().toLocaleString();
                 document.getElementById('loading').style.display = 'none';
