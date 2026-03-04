@@ -14,6 +14,9 @@
 | **YARR** | 20% | 80% → treasury |
 | **WETH** | 20% | 80% → diversified (RED/WBTC/CLAWD/reserve) |
 
+### 20% Development Cost
+The 20% creator allocation covers ongoing development, infrastructure, and maintenance of the Clawdmatey treasury bot. This ensures sustainable, long-term operation without relying on external funding or token dumps.
+
 ### Burn Mechanism  
 - If treasury holds **>5% of YARR supply** → excess is burned
 - Deflationary pressure when treasury grows
