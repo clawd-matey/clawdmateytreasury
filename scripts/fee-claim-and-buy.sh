@@ -1,12 +1,13 @@
 #!/bin/bash
-# RedBotster Fee Claim + Accumulate Automation
+# Clawdmatey Fee Claim + Accumulate Automation
 #
 # Flow:
-#   1. Check unclaimed Clanker creator fees for RED
+#   1. Check unclaimed Clanker creator fees for YARR
 #   2. If above threshold, claim them
-#   3. Split proceeds: GRT buy (Ethereum mainnet) + RED burn (Base → 0xdead)
-#   4. Post character-driven tweet via xurl
-#   5. Log everything to ~/RedBotster/logs/
+#   3. Split proceeds: 20% each to RED, GRT, WBTC, CLAWD, YARR
+#   4. Burn YARR if holding >5% of supply (burn excess only)
+#   5. Post character-driven tweet via xurl
+#   6. Log everything
 #
 # Usage: ./fee-claim-and-buy.sh [--dry-run]
 
@@ -17,30 +18,36 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$PROJECT_DIR/config.json"
 LOG_DIR="$PROJECT_DIR/logs"
-TRACKER="$HOME/RedBotster.md"
+TRACKER="$HOME/Clawdmatey.md"
 
 BANKR="$HOME/.openclaw/workspace/skills/bankr/scripts/bankr.sh"
 SWAP_SCRIPT="$SCRIPT_DIR/uniswap-swap.py"
-RED_TOKEN="0x2e662015a501f066e043d64d04f77ffe551a4b07"
-GRT_TOKEN_ARB="0x9623063377AD1B27544C965cCd7342f7EA7e88C7"    # GRT on Arbitrum
-WBTC_TOKEN_BASE="0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"  # WBTC on Base
-YARR_TOKEN_BASE="0x309792e8950405f803c0e3f2c9083bdff4466ba3" # YARR on Base
-CLAWD_TOKEN_BASE="0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07" # CLAWD on Base
+
+# Primary token: YARR (fees come from this)
+YARR_TOKEN="0x309792e8950405f803c0e3f2c9083bdff4466ba3"
+
+# Portfolio tokens
+RED_TOKEN_BASE="0x2e662015a501f066e043d64d04f77ffe551a4b07"
+GRT_TOKEN_ARB="0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
+WBTC_TOKEN_BASE="0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"
+CLAWD_TOKEN_BASE="0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07"
+
 BURN_ADDRESS="0x000000000000000000000000000000000000dEaD"
-PUNKWALLET="0xEF5527cC704C5Ca5443869EAECbB8613d9D97E5F"
-BANKR_TIMEOUT=20  # seconds before we consider bankr down and fall back to Uniswap
-BLOCKED_WARNING=""  # populated from config.json if blockedContracts is set
+TREASURY_WALLET=""  # Set in config.json
+BANKR_TIMEOUT=20
+BLOCKED_WARNING=""
 
 # Defaults (overridden by config.json if present)
-MIN_THRESHOLD=10      # USD — don't run if fees below this
-WETH_FALLBACK_MIN=1   # USD — minimum for WETH fallback swaps (much lower than fee threshold)
-GRT_SPLIT_PCT=20      # % to buy GRT
-WBTC_SPLIT_PCT=20     # % to buy WBTC
-CLAWD_SPLIT_PCT=20    # % to buy CLAWD (Base)
-RED_SPLIT_PCT=20      # % to buy RED (burn only if >5% of supply)
-YARR_SPLIT_PCT=20     # % to buy YARR
+MIN_THRESHOLD=10
+WETH_FALLBACK_MIN=1
+RED_SPLIT_PCT=20
+GRT_SPLIT_PCT=20
+WBTC_SPLIT_PCT=20
+CLAWD_SPLIT_PCT=20
+YARR_SPLIT_PCT=20
+YARR_BURN_THRESHOLD_PCT=5
 DRY_RUN=false
-TWEET_ENABLED=false   # disabled until X posting is working
+TWEET_ENABLED=false
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 for arg in "$@"; do
@@ -54,19 +61,21 @@ done
 if [ -f "$CONFIG_FILE" ]; then
   MIN_THRESHOLD=$(jq -r '.minThresholdUSD // 10' "$CONFIG_FILE")
   WETH_FALLBACK_MIN=$(jq -r '.wethFallbackMin // 1' "$CONFIG_FILE")
+  RED_SPLIT_PCT=$(jq -r '.redSplitPct // 20' "$CONFIG_FILE")
   GRT_SPLIT_PCT=$(jq -r '.grtSplitPct // 20' "$CONFIG_FILE")
   WBTC_SPLIT_PCT=$(jq -r '.wbtcSplitPct // 20' "$CONFIG_FILE")
   CLAWD_SPLIT_PCT=$(jq -r '.clawdSplitPct // 20' "$CONFIG_FILE")
-  RED_SPLIT_PCT=$(jq -r '.redSplitPct // 20' "$CONFIG_FILE")
   YARR_SPLIT_PCT=$(jq -r '.yarrSplitPct // 20' "$CONFIG_FILE")
+  YARR_BURN_THRESHOLD_PCT=$(jq -r '.yarrBurnThresholdPct // 5' "$CONFIG_FILE")
+  YARR_TOKEN=$(jq -r '.yarrToken // "0x309792e8950405f803c0e3f2c9083bdff4466ba3"' "$CONFIG_FILE")
+  RED_TOKEN_BASE=$(jq -r '.redTokenBase // "0x2e662015a501f066e043d64d04f77ffe551a4b07"' "$CONFIG_FILE")
   GRT_TOKEN_ARB=$(jq -r '.grtTokenArbitrum // "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"' "$CONFIG_FILE")
   WBTC_TOKEN_BASE=$(jq -r '.wbtcTokenBase // "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"' "$CONFIG_FILE")
-  YARR_TOKEN_BASE=$(jq -r '.yarrTokenBase // "0x309792e8950405f803c0e3f2c9083bdff4466ba3"' "$CONFIG_FILE")
   CLAWD_TOKEN_BASE=$(jq -r '.clawdTokenBase // "0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07"' "$CONFIG_FILE")
-  # Build a safety warning string for all bankr prompts
+  TREASURY_WALLET=$(jq -r '.treasuryWallet // ""' "$CONFIG_FILE")
   BLOCKED_WARNING=$(jq -r '
     if (.blockedContracts | length) > 0 then
-      "IMPORTANT: Do NOT interact with, sell, swap, or use any of these contracts under any circumstances: " +
+      "IMPORTANT: Do NOT interact with these contracts: " +
       (.blockedContracts | join(", ")) + ". Treat them as non-existent."
     else "" end
   ' "$CONFIG_FILE" 2>/dev/null || echo "")
@@ -77,7 +86,6 @@ mkdir -p "$LOG_DIR"
 LOGFILE="$LOG_DIR/$(date +%Y-%m-%d).log"
 TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-# log writes to stderr + logfile only — stdout is reserved for clean JSON returns
 log() {
   local msg="[$TIMESTAMP] $*"
   echo "$msg" >&2
@@ -85,96 +93,73 @@ log() {
 }
 log_section() { echo "" >> "$LOGFILE"; log "── $* ──"; }
 
-log_section "RedBotster Fee Automation START"
-log "DRY_RUN=$DRY_RUN | threshold=\$$MIN_THRESHOLD | split=${GRT_SPLIT_PCT}% GRT / ${RED_SPLIT_PCT}% RED / ${WBTC_SPLIT_PCT}% WBTC / ${YARR_SPLIT_PCT}% YARR"
+log_section "Clawdmatey Fee Automation START"
+log "DRY_RUN=$DRY_RUN | threshold=\$$MIN_THRESHOLD | split=${RED_SPLIT_PCT}% RED / ${GRT_SPLIT_PCT}% GRT / ${WBTC_SPLIT_PCT}% WBTC / ${CLAWD_SPLIT_PCT}% CLAWD / ${YARR_SPLIT_PCT}% YARR"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Extract a dollar amount from bankr natural-language response.
-# Tries: $X.XX | X USDC | X USD | USD X — returns empty string if not found.
 parse_usd() {
   local text="$1"
-  # Strip price-per-token patterns (e.g. $2011.94/ETH) before parsing to avoid grabbing token prices
   local clean
   clean=$(echo "$text" | sed 's/\$[0-9][0-9]*\(\.[0-9]*\)\?\/[A-Za-z][A-Za-z]*/PRICE/g')
   local val
-  # 1. Prefer explicit total lines — most reliable
   val=$(echo "$clean" | grep -iE 'grand total|total available|total usd converted|total converted|total claimable' | grep -oE '\$[0-9]+(\.[0-9]+)?' | head -1 | tr -d '$') && [ -n "$val" ] && echo "$val" && return
-  # 2. Fall back to the largest dollar-sign amount (with price-per-token stripped)
   val=$(echo "$clean" | grep -oE '\$[0-9]+(\.[0-9]+)?' | tr -d '$' | sort -rn | head -1) && [ -n "$val" ] && echo "$val" && return
-  # 3. USDC amount (largest)
   val=$(echo "$clean" | grep -oiE '[0-9]+(\.[0-9]+)?\s*USDC' | grep -oE '[0-9]+(\.[0-9]+)?' | sort -rn | head -1) && [ -n "$val" ] && echo "$val" && return
-  # 4. "X USD" (largest)
   val=$(echo "$clean" | grep -oiE '[0-9]+(\.[0-9]+)?\s*USD' | grep -oE '[0-9]+(\.[0-9]+)?' | sort -rn | head -1) && [ -n "$val" ] && echo "$val" && return
   echo ""
 }
 
-# Integer math: floor(A * B / 100)
 pct_of() {
   local total="$1" pct="$2"
   echo "$total $pct" | awk '{printf "%.2f", $1 * $2 / 100}'
 }
 
-# Check if xurl is authenticated
 xurl_ready() {
   xurl auth status 2>/dev/null | grep -q "Logged in" && return 0 || return 1
 }
 
-# Post to @redbotster (disabled until X posting is working)
 tweet() {
   local msg="$1"
   if [ "$TWEET_ENABLED" = "false" ]; then
-    log "Tweeting disabled — skipping (re-enable with --tweet flag)"
+    log "Tweeting disabled — skipping"
     return
   fi
   if xurl_ready; then
     if [ "$DRY_RUN" = "true" ]; then
       log "[DRY RUN] Would tweet: $msg"
     else
-      xurl post "$msg" >> "$LOGFILE" 2>&1 && log "Tweeted: $msg" || log "WARN: Tweet failed (non-fatal)"
+      xurl post "$msg" >> "$LOGFILE" 2>&1 && log "Tweeted: $msg" || log "WARN: Tweet failed"
     fi
   else
     log "xurl not authenticated — skipping tweet"
   fi
 }
 
-# Check if bankr is responsive (quick probe)
-bankr_alive() {
-  if [ ! -f "$BANKR" ]; then return 1; fi
-  # Try a trivial call with a short timeout
-  if command -v gtimeout &>/dev/null; then
-    gtimeout "$BANKR_TIMEOUT" "$BANKR" "ping" >/dev/null 2>&1 && return 0 || return 1
-  else
-    # No gtimeout on macOS by default — use background job approach
-    "$BANKR" "ping" >/dev/null 2>&1 &
-    local pid=$!
-    sleep "$BANKR_TIMEOUT"
-    if kill -0 "$pid" 2>/dev/null; then kill "$pid"; return 1; fi
-    return 0
-  fi
-}
-
-# Run a bankr command and return JSON to stdout (logs go to stderr/logfile only)
 bankr_run() {
   local prompt="$1"
-  # Prepend blocked-contract warning to every prompt if set
   if [ -n "$BLOCKED_WARNING" ]; then
     prompt="$BLOCKED_WARNING $prompt"
   fi
   log "BANKR: $prompt"
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY RUN] Would run bankr: $prompt"
-    # Simulate realistic responses based on prompt keywords
     if echo "$prompt" | grep -qi "check\|balance\|unclaimed"; then
-      echo '{"status":"completed","response":"You have $24.50 in unclaimed Clanker creator fees for RED token on Base."}'
+      echo '{"status":"completed","response":"You have $24.50 in unclaimed Clanker creator fees for YARR token on Base."}'
     elif echo "$prompt" | grep -qi "claim"; then
-      echo '{"status":"completed","response":"Successfully claimed $24.50 USDC in creator fees for RED on Base."}'
+      echo '{"status":"completed","response":"Successfully claimed $24.50 USDC in creator fees for YARR on Base."}'
     elif echo "$prompt" | grep -qi "GRT"; then
-      echo '{"status":"completed","response":"Bought 850.25 GRT on Ethereum mainnet for $17.15 USDC."}'
-    elif echo "$prompt" | grep -qi "buy.*RED\|RED.*buy"; then
-      echo '{"status":"completed","response":"Bought 42000 RED on Base for $7.35 USDC."}'
+      echo '{"status":"completed","response":"Bought 850.25 GRT on Arbitrum for $17.15."}'
+    elif echo "$prompt" | grep -qi "RED"; then
+      echo '{"status":"completed","response":"Bought 42000 RED on Base for $7.35."}'
+    elif echo "$prompt" | grep -qi "WBTC"; then
+      echo '{"status":"completed","response":"Bought 0.0001 WBTC on Base for $7.35."}'
+    elif echo "$prompt" | grep -qi "CLAWD"; then
+      echo '{"status":"completed","response":"Bought 15000 CLAWD on Base for $7.35."}'
+    elif echo "$prompt" | grep -qi "YARR"; then
+      echo '{"status":"completed","response":"Bought 100000 YARR on Base for $7.35."}'
     elif echo "$prompt" | grep -qi "send\|burn\|0xdead"; then
-      echo '{"status":"completed","response":"Sent 42000 RED to burn address 0x000000000000000000000000000000000000dEaD. Transaction confirmed."}'
+      echo '{"status":"completed","response":"Sent tokens to burn address. Transaction confirmed."}'
     else
       echo '{"status":"completed","response":"Operation completed successfully."}'
     fi
@@ -183,9 +168,6 @@ bankr_run() {
   "$BANKR" "$prompt" 2>>"$LOGFILE" || true
 }
 
-# Swap via Uniswap v3 (punkwallet private key — used for punkwallet ops and fee-claim fallback)
-# uniswap_swap <token-out> <amount-usd>
-# Converts USD → WETH amount using global ETH_PRICE before calling uniswap-swap.py
 uniswap_swap() {
   local token_out="$1" amount_usd="$2"
   local weth_amount
@@ -193,162 +175,112 @@ uniswap_swap() {
   log "UNISWAP: swap $amount_usd USD ($weth_amount WETH) → $token_out"
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY RUN] Would uniswap swap $weth_amount WETH → $token_out"
-    if [ "$token_out" = "GRT" ]; then
-      echo '{"status":"completed","response":"Swapped 0.01 WETH to GRT on ethereum."}'
-    elif [ "$token_out" = "WBTC" ]; then
-      echo '{"status":"completed","response":"Swapped 0.01 WETH to WBTC on ethereum."}'
-    elif [ "$token_out" = "YARR" ]; then
-      echo '{"status":"completed","response":"Swapped 0.01 WETH to YARR on base."}'
-    elif [ "$token_out" = "CLAWD" ]; then
-      echo '{"status":"completed","response":"Swapped 0.01 WETH to CLAWD on base."}'
-    else
-      echo '{"status":"completed","response":"Bought RED on base via Clanker pool."}'
-    fi
+    echo '{"status":"completed","response":"Swapped WETH to '"$token_out"'."}'
     return
   fi
   python3 "$SWAP_SCRIPT" swap --token-out "$token_out" --amount "$weth_amount" 2>>"$LOGFILE" || true
 }
 
-# Transfer token to address via Uniswap script
-# uniswap_transfer <token> <to-address>
-uniswap_transfer() {
-  local token="$1" to="$2"
-  log "UNISWAP TRANSFER: all $token → $to"
-  if [ "$DRY_RUN" = "true" ]; then
-    log "[DRY RUN] Would transfer all $token to $to"
-    echo '{"status":"completed","response":"Sent 42000 RED to burn address. Transaction confirmed."}'
+sweep_yarr() {
+  log_section "YARR Sweep → treasury"
+  if [ -z "$TREASURY_WALLET" ]; then
+    log "No treasury wallet configured — skipping sweep"
     return
   fi
-  python3 "$SWAP_SCRIPT" transfer --token "$token" --to "$to" 2>>"$LOGFILE"
+  local sweep_result sweep_response
+  sweep_result=$(bankr_run "Send all my YARR token ($YARR_TOKEN) on Base to $TREASURY_WALLET" 2>/dev/null) || true
+  sweep_response=$(echo "$sweep_result" | jq -r '.response // ""' 2>/dev/null || echo "no YARR to sweep")
+  log "YARR sweep: $sweep_response"
 }
 
-# Swap 5% of WETH balance into treasury allocations (GRT / WBTC / RED)
-# Called on every run regardless of whether fees were claimed
 weth_allocation_swap() {
   log_section "WETH 5% Allocation Swap"
-  local weth_result weth_response weth_usd fallback_usd
-  local fb_grt_usd fb_wbtc_usd fb_clawd_usd fb_red_usd fb_yarr_usd
-  local fb_grt_result fb_grt_response fb_grt_tokens
-  local fb_wbtc_result fb_wbtc_response fb_wbtc_tokens
-  local fb_clawd_result fb_clawd_response fb_clawd_tokens
-  local fb_red_result fb_red_response fb_red_tokens
-  local fb_yarr_result fb_yarr_response fb_yarr_tokens
+  
+  if [ -z "$TREASURY_WALLET" ]; then
+    log "No treasury wallet configured — skipping WETH allocation swap"
+    return
+  fi
 
-  # Query punkwallet WETH balance directly via Base RPC (bankr can't read external wallets)
   local weth_contract="0x4200000000000000000000000000000000000006"
-  local rpc_data="0x70a08231000000000000000000000000${PUNKWALLET:2}"
-  local raw_balance weth_amount
+  local rpc_data="0x70a08231000000000000000000000000${TREASURY_WALLET:2}"
+  local raw_balance weth_amount weth_usd fallback_usd
+  
   raw_balance=$(curl -s -X POST https://mainnet.base.org \
     -H "Content-Type: application/json" \
     -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"$weth_contract\",\"data\":\"$rpc_data\"},\"latest\"],\"id\":1}" \
     | jq -r '.result' 2>/dev/null || echo "0x0")
   weth_amount=$(python3 -c "print(int('$raw_balance', 16) / 1e18)" 2>/dev/null || echo "0")
   weth_usd=$(echo "$weth_amount ${ETH_PRICE:-2000}" | awk '{printf "%.2f", $1 * $2}')
-  log "Punkwallet WETH: $weth_amount WETH @ \$${ETH_PRICE:-2000} = \$$weth_usd"
+  log "Treasury WETH: $weth_amount WETH @ \$${ETH_PRICE:-2000} = \$$weth_usd"
 
   if [ -z "$weth_usd" ] || [ "$(echo "$weth_usd" | awk '{print ($1 <= 0) ? "yes" : "no"}')" = "yes" ]; then
-    log "Punkwallet WETH balance is zero — skipping WETH allocation swap."
+    log "Treasury WETH balance is zero — skipping"
     return
   fi
 
   fallback_usd=$(echo "$weth_usd" | awk '{printf "%.2f", $1 * 0.05}')
-  log "Punkwallet WETH ~\$$weth_usd — 5% = \$$fallback_usd"
+  log "Treasury WETH ~\$$weth_usd — 5% = \$$fallback_usd"
 
   if [ "$(echo "$fallback_usd $WETH_FALLBACK_MIN" | awk '{print ($1 >= $2) ? "yes" : "no"}')" = "no" ]; then
-    log "5% of WETH (\$$fallback_usd) below minimum \$$WETH_FALLBACK_MIN — skipping."
+    log "5% of WETH (\$$fallback_usd) below minimum \$$WETH_FALLBACK_MIN — skipping"
     return
   fi
 
+  local fb_red_usd fb_grt_usd fb_wbtc_usd fb_clawd_usd fb_yarr_usd
+  fb_red_usd=$(pct_of "$fallback_usd" "$RED_SPLIT_PCT")
   fb_grt_usd=$(pct_of "$fallback_usd" "$GRT_SPLIT_PCT")
   fb_wbtc_usd=$(pct_of "$fallback_usd" "$WBTC_SPLIT_PCT")
   fb_clawd_usd=$(pct_of "$fallback_usd" "$CLAWD_SPLIT_PCT")
-  fb_red_usd=$(pct_of "$fallback_usd" "$RED_SPLIT_PCT")
   fb_yarr_usd=$(pct_of "$fallback_usd" "$YARR_SPLIT_PCT")
-  log "Split: \$$fallback_usd → GRT: \$$fb_grt_usd | WBTC: \$$fb_wbtc_usd | CLAWD: \$$fb_clawd_usd | RED: \$$fb_red_usd | YARR: \$$fb_yarr_usd"
+  
+  log "Split: \$$fallback_usd → RED: \$$fb_red_usd | GRT: \$$fb_grt_usd | WBTC: \$$fb_wbtc_usd | CLAWD: \$$fb_clawd_usd | YARR: \$$fb_yarr_usd"
 
-  # All punkwallet swaps go directly through uniswap-swap.py (private key from 1claw vault)
-  fb_grt_result=$(uniswap_swap "GRT" "$fb_grt_usd")
-  fb_grt_response=$(echo "$fb_grt_result" | jq -r '.response // ""' 2>/dev/null || echo "")
-  log "WETH→GRT: $fb_grt_response"
-  fb_grt_tokens=$(echo "$fb_grt_response" | grep -oiE '[0-9]+(\.[0-9]+)?\s*GRT' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "\$$fb_grt_usd worth")
+  # Execute swaps
+  uniswap_swap "GRT" "$fb_grt_usd"
+  uniswap_swap "WBTC" "$fb_wbtc_usd"
+  uniswap_swap "CLAWD" "$fb_clawd_usd"
+  bankr_run "Buy exactly \$$fb_red_usd worth of RED ($RED_TOKEN_BASE) on Base using WETH. Execute via Clanker pool."
+  bankr_run "Buy exactly \$$fb_yarr_usd worth of YARR ($YARR_TOKEN) on Base using WETH. Execute via Clanker pool."
 
-  fb_wbtc_result=$(uniswap_swap "WBTC" "$fb_wbtc_usd")
-  fb_wbtc_response=$(echo "$fb_wbtc_result" | jq -r '.response // ""' 2>/dev/null || echo "")
-  log "WETH→WBTC: $fb_wbtc_response"
-  fb_wbtc_tokens=$(echo "$fb_wbtc_response" | grep -oiE '[0-9]+(\.[0-9]+)?\s*WBTC' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "\$$fb_wbtc_usd worth")
-
-  fb_clawd_result=$(uniswap_swap "CLAWD" "$fb_clawd_usd")
-  fb_clawd_response=$(echo "$fb_clawd_result" | jq -r '.response // ""' 2>/dev/null || echo "")
-  log "WETH→CLAWD: $fb_clawd_response"
-  fb_clawd_tokens=$(echo "$fb_clawd_response" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*CLAWD' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "\$$fb_clawd_usd worth")
-
-  # RED and YARR are Clanker tokens — route through bankr, not Uniswap v3
-  fb_red_result=$(bankr_run "Buy exactly \$$fb_red_usd worth of RED ($RED_TOKEN) on Base using WETH. Execute via Clanker pool without asking for confirmation.")
-  fb_red_response=$(echo "$fb_red_result" | jq -r '.response // ""' 2>/dev/null || echo "$fb_red_result")
-  log "WETH→RED: $fb_red_response"
-  fb_red_tokens=$(echo "$fb_red_response" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*RED' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "\$$fb_red_usd worth")
-
-  fb_yarr_result=$(bankr_run "Buy exactly \$$fb_yarr_usd worth of YARR ($YARR_TOKEN_BASE) on Base using WETH. YARR is a Clanker token. Execute without asking for confirmation.")
-  fb_yarr_response=$(echo "$fb_yarr_result" | jq -r '.response // ""' 2>/dev/null || echo "$fb_yarr_result")
-  log "WETH→YARR: $fb_yarr_response"
-  fb_yarr_tokens=$(echo "$fb_yarr_response" | grep -oiE '[0-9]+(\.[0-9]+)?\s*YARR' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "\$$fb_yarr_usd worth")
-
-  update_tracker "WETH 5% swap (\$$fallback_usd): ${fb_grt_tokens} GRT | ${fb_wbtc_tokens} WBTC | ${fb_clawd_tokens} CLAWD | ${fb_red_tokens} RED | ${fb_yarr_tokens} YARR"
-  log "WETH swap complete — GRT: ${fb_grt_tokens} | WBTC: ${fb_wbtc_tokens} | CLAWD: ${fb_clawd_tokens} | RED: ${fb_red_tokens} | YARR: ${fb_yarr_tokens}"
+  log "WETH swap complete"
 }
 
-# Sweep all RED from bankr wallet to punkwallet
-sweep_red() {
-  log_section "RED Sweep → punkwallet"
-  local sweep_result sweep_response
-  sweep_result=$(bankr_run "Send all my RED token ($RED_TOKEN) on Base to $PUNKWALLET" 2>/dev/null) || true
-  sweep_response=$(echo "$sweep_result" | jq -r '.response // ""' 2>/dev/null || echo "no RED to sweep")
-  log "RED sweep: $sweep_response"
-}
-
-# Append a structured row to ~/RedBotster/runs.md
-# write_run_summary <mode> <fees_usd> <grt> <wbtc> <red> <weth_swapped_usd> <burn_note>
 RUNS_FILE="$PROJECT_DIR/runs.md"
 write_run_summary() {
-  local mode="$1" fees="$2" grt="$3" wbtc="$4" yarr="$5" clawd="$6" red="$7" weth="$8" burn="${9:-}"
+  local mode="$1" fees="$2" red="$3" grt="$4" wbtc="$5" clawd="$6" yarr="$7" weth="$8" burn="${9:-}"
   local ts
   ts="$(date -u '+%Y-%m-%d %H:%M UTC')"
-  # Create file with header if it doesn't exist
   if [ ! -f "$RUNS_FILE" ]; then
     cat > "$RUNS_FILE" <<'EOF'
-# RedBotster Run History
+# Clawdmatey Run History
 
-| Time (UTC) | Mode | Fees Claimed | GRT | WBTC | YARR | CLAWD | RED | WETH Swapped | Burn |
+| Time (UTC) | Mode | Fees Claimed | RED | GRT | WBTC | CLAWD | YARR | WETH Swapped | Burn |
 |---|---|---|---|---|---|---|---|---|---|
 EOF
   fi
-  echo "| $ts | $mode | \$$fees | $grt | $wbtc | $yarr | $clawd | $red | $weth | $burn |" >> "$RUNS_FILE"
+  echo "| $ts | $mode | \$$fees | $red | $grt | $wbtc | $clawd | $yarr | $weth | $burn |" >> "$RUNS_FILE"
 }
 
-# Append a summary line to ~/RedBotster.md
 update_tracker() {
   local line="$1"
   if [ -f "$TRACKER" ]; then
-    # Insert under ## Decisions Log
     local entry="- $(date +%Y-%m-%d): $line"
-    # Append to end of file
     echo "$entry" >> "$TRACKER"
   fi
 }
 
-# ── Fetch ETH price once (used for USD→WETH conversions throughout) ───────────
+# ── Fetch ETH price ───────────────────────────────────────────────────────────
 ETH_PRICE=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd" \
   | jq -r '.ethereum.usd' 2>/dev/null || echo "2000")
 log "ETH price: \$$ETH_PRICE"
 
-# ── Step 1: Check current fee balance ─────────────────────────────────────────
-log_section "Step 1: Check Clanker fee balance"
+# ── Step 1: Check YARR fee balance ────────────────────────────────────────────
+log_section "Step 1: Check Clanker fee balance for YARR"
 
-CHECK_RESULT=$(bankr_run "Check my current unclaimed Clanker creator fee balance across ALL of my Clanker pools on Base, including the Red Botster token pool ($RED_TOKEN) and any other pools associated with my wallet. Show me the grand total USD value available to claim across all pools.")
+CHECK_RESULT=$(bankr_run "Check my current unclaimed Clanker creator fee balance for YARR token ($YARR_TOKEN) on Base. Show me the total USD value available to claim.")
 CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
 log "Response: $CHECK_RESPONSE"
 
-# Parse the dollar amount first — only fall back to WETH if no non-zero amount found
 AVAILABLE_USD=$(parse_usd "$CHECK_RESPONSE")
 log "Parsed available: \$$AVAILABLE_USD"
 
@@ -358,10 +290,10 @@ if [ -z "$AVAILABLE_USD" ] || [ "$(echo "$AVAILABLE_USD" | awk '{print ($1 <= 0)
 fi
 
 if [ "$NO_FEES" = "true" ]; then
-  log "No fees to claim — sweeping RED and running WETH 5% allocation swap"
-  sweep_red
+  log "No fees to claim — sweeping YARR and running WETH 5% allocation swap"
+  sweep_yarr
   weth_allocation_swap
-  update_tracker "No fees this run — RED swept + WETH 5% allocation swap run"
+  update_tracker "No fees this run — YARR swept + WETH 5% allocation swap run"
   write_run_summary "no-fees" "0" "-" "-" "-" "-" "-" "5% of WETH" "-"
   log_section "DONE (no fees)"
   exit 0
@@ -370,42 +302,29 @@ fi
 # ── Step 2: Threshold check ───────────────────────────────────────────────────
 log_section "Step 2: Threshold check"
 
-if [ -z "$AVAILABLE_USD" ]; then
-  log "Could not parse fee amount from response. Proceeding with claim anyway."
-else
-  # bc comparison: is available >= threshold?
-  ABOVE=$(echo "$AVAILABLE_USD $MIN_THRESHOLD" | awk '{print ($1 >= $2) ? "yes" : "no"}')
-  if [ "$ABOVE" = "no" ]; then
-    log "Available \$$AVAILABLE_USD is below threshold \$$MIN_THRESHOLD — skipping claim, running WETH swap + RED sweep."
-    sweep_red
-    weth_allocation_swap
-    update_tracker "Fees below threshold (\$$AVAILABLE_USD) — RED swept + WETH 5% swap run"
-    write_run_summary "below-threshold" "$AVAILABLE_USD" "-" "-" "-" "-" "-" "5% of WETH" "-"
-    log_section "DONE (below threshold)"
-    exit 0
-  fi
-  log "\$$AVAILABLE_USD >= threshold \$$MIN_THRESHOLD — proceeding."
+ABOVE=$(echo "$AVAILABLE_USD $MIN_THRESHOLD" | awk '{print ($1 >= $2) ? "yes" : "no"}')
+if [ "$ABOVE" = "no" ]; then
+  log "Available \$$AVAILABLE_USD is below threshold \$$MIN_THRESHOLD — skipping claim"
+  sweep_yarr
+  weth_allocation_swap
+  update_tracker "Fees below threshold (\$$AVAILABLE_USD) — YARR swept + WETH 5% swap run"
+  write_run_summary "below-threshold" "$AVAILABLE_USD" "-" "-" "-" "-" "-" "5% of WETH" "-"
+  log_section "DONE (below threshold)"
+  exit 0
 fi
+log "\$$AVAILABLE_USD >= threshold \$$MIN_THRESHOLD — proceeding."
 
 # ── Step 3: Claim fees ────────────────────────────────────────────────────────
-log_section "Step 3: Claim Clanker fees"
+log_section "Step 3: Claim YARR Clanker fees"
 
-CLAIM_RESULT=$(bankr_run "Claim ALL unclaimed Clanker creator fees from every pool associated with my wallet on Base, including the Red Botster token pool ($RED_TOKEN) and any other pools. After claiming, immediately swap any non-WETH tokens received as fees into WETH on Base. Tell me the total USD value claimed and converted.")
+CLAIM_RESULT=$(bankr_run "Claim ALL unclaimed Clanker creator fees for YARR ($YARR_TOKEN) on Base. After claiming, swap any non-WETH tokens to WETH. Tell me the total USD value claimed.")
 CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
 log "Claim response: $CLAIM_RESPONSE"
 
 CLAIMED_USD=$(parse_usd "$CLAIM_RESPONSE")
 if [ -z "$CLAIMED_USD" ]; then
   CLAIMED_USD="${AVAILABLE_USD:-0}"
-  log "Could not parse claimed amount — using pre-claim estimate: \$$CLAIMED_USD"
-elif [ -n "$AVAILABLE_USD" ]; then
-  # If bankr only returned a fraction of what was available, use available as the basis
-  # (guards against partial claims where only one pool's fees were parsed in the response)
-  RATIO=$(echo "$CLAIMED_USD $AVAILABLE_USD" | awk '{printf "%.2f", $1 / $2}')
-  if [ "$(echo "$RATIO" | awk '{print ($1 < 0.5) ? "yes" : "no"}')" = "yes" ]; then
-    log "WARN: Claimed \$$CLAIMED_USD but \$$AVAILABLE_USD was available — likely partial claim response. Using available amount for splits."
-    CLAIMED_USD="$AVAILABLE_USD"
-  fi
+  log "Could not parse claimed amount — using estimate: \$$CLAIMED_USD"
 fi
 
 log "Claimed: \$$CLAIMED_USD"
@@ -415,221 +334,140 @@ if [ "$CLAIMED_USD" = "0" ] || [ -z "$CLAIMED_USD" ]; then
   exit 0
 fi
 
-# ── Step 3b: Sweep RED from bankr wallet to punkwallet ────────────────────────
-if [ "$DRY_RUN" = "true" ]; then
-  log "[DRY RUN] Would sweep RED from bankr to $PUNKWALLET"
-else
-  sweep_red
-fi
-
 # ── Step 4: Calculate splits ──────────────────────────────────────────────────
 log_section "Step 4: Calculating splits"
 
+RED_USD=$(pct_of "$CLAIMED_USD" "$RED_SPLIT_PCT")
 GRT_USD=$(pct_of "$CLAIMED_USD" "$GRT_SPLIT_PCT")
 WBTC_USD=$(pct_of "$CLAIMED_USD" "$WBTC_SPLIT_PCT")
 CLAWD_USD=$(pct_of "$CLAIMED_USD" "$CLAWD_SPLIT_PCT")
-RED_USD=$(pct_of "$CLAIMED_USD" "$RED_SPLIT_PCT")
 YARR_USD=$(pct_of "$CLAIMED_USD" "$YARR_SPLIT_PCT")
 
-log "Claimed \$$CLAIMED_USD → GRT: \$$GRT_USD (${GRT_SPLIT_PCT}%) | WBTC: \$$WBTC_USD (${WBTC_SPLIT_PCT}%) | CLAWD: \$$CLAWD_USD (${CLAWD_SPLIT_PCT}%) | RED: \$$RED_USD (${RED_SPLIT_PCT}%) | YARR: \$$YARR_USD (${YARR_SPLIT_PCT}%)"
+log "Claimed \$$CLAIMED_USD → RED: \$$RED_USD | GRT: \$$GRT_USD | WBTC: \$$WBTC_USD | CLAWD: \$$CLAWD_USD | YARR: \$$YARR_USD"
 
-# ── Step 5: Buy GRT on Arbitrum ───────────────────────────────────────────────
-log_section "Step 5: Buy GRT (Arbitrum)"
+# ── Step 5: Buy tokens ────────────────────────────────────────────────────────
+log_section "Step 5: Buy portfolio tokens"
 
-GRT_RESULT=""
-if [ "$DRY_RUN" = "false" ] && [ -f "$BANKR" ]; then
-  log "Attempting bankr for GRT buy..."
-  GRT_RESULT=$(bankr_run "Buy exactly \$$GRT_USD worth of GRT ($GRT_TOKEN_ARB) on Arbitrum. If needed, bridge WETH from Base automatically — do not ask for confirmation, just execute." 2>/dev/null) || true
-fi
+# RED (Clanker)
+RED_RESULT=$(bankr_run "Buy exactly \$$RED_USD worth of RED ($RED_TOKEN_BASE) on Base using WETH. Execute via Clanker pool.")
+RED_RESPONSE=$(echo "$RED_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+RED_TOKENS=$(echo "$RED_RESPONSE" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*RED' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "")
+log "RED buy: $RED_RESPONSE"
 
-if [ -z "$GRT_RESULT" ] || echo "$GRT_RESULT" | grep -qi "error\|failed\|timeout"; then
-  log "Bankr unavailable for GRT — using Uniswap v3 (WETH→GRT on Arbitrum)"
-  GRT_RESULT=$(uniswap_swap "GRT" "$GRT_USD")
-fi
-
+# GRT (Arbitrum via Across bridge)
+GRT_RESULT=$(bankr_run "Buy exactly \$$GRT_USD worth of GRT ($GRT_TOKEN_ARB) on Arbitrum. Bridge WETH from Base automatically. Execute now.")
 GRT_RESPONSE=$(echo "$GRT_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "GRT buy response: $GRT_RESPONSE"
 GRT_TOKENS=$(echo "$GRT_RESPONSE" | grep -oiE '[0-9]+(\.[0-9]+)?\s*GRT' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "")
+log "GRT buy: $GRT_RESPONSE"
 
-# ── Step 5b: Buy WBTC on Base ─────────────────────────────────────────────────
-log_section "Step 5b: Buy WBTC (Base, 20%)"
-
-WBTC_RESULT=""
-if [ "$DRY_RUN" = "false" ] && [ -f "$BANKR" ]; then
-  log "Attempting bankr for WBTC buy..."
-  WBTC_RESULT=$(bankr_run "Buy exactly \$$WBTC_USD worth of WBTC ($WBTC_TOKEN_BASE) on Base. Use my WETH balance — I have WETH on Base. Execute the swap now without asking for confirmation." 2>/dev/null) || true
-fi
-
-if [ -z "$WBTC_RESULT" ] || echo "$WBTC_RESULT" | grep -qi "error\|failed\|timeout\|not enough\|don't have enough\|wanna swap\|want me to"; then
-  log "Bankr unavailable for WBTC — using Uniswap v3 (WETH→WBTC on Base)"
-  WBTC_RESULT=$(uniswap_swap "WBTC" "$WBTC_USD")
-fi
-
+# WBTC (Uniswap v3)
+WBTC_RESULT=$(uniswap_swap "WBTC" "$WBTC_USD")
 WBTC_RESPONSE=$(echo "$WBTC_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "WBTC buy response: $WBTC_RESPONSE"
 WBTC_TOKENS=$(echo "$WBTC_RESPONSE" | grep -oiE '[0-9]+(\.[0-9]+)?\s*WBTC' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "")
+log "WBTC buy: $WBTC_RESPONSE"
 
-# ── Step 5c: Buy YARR on Base ─────────────────────────────────────────────────
-log_section "Step 5c: Buy YARR (Base, 20%)"
-
-YARR_RESULT=""
-if [ "$DRY_RUN" = "false" ] && [ -f "$BANKR" ]; then
-  log "Attempting bankr for YARR buy..."
-  YARR_RESULT=$(bankr_run "Buy exactly \$$YARR_USD worth of YARR ($YARR_TOKEN_BASE) on Base mainnet. YARR is a Clanker token — use my WETH balance and route through the Clanker pool. Execute now without asking for confirmation." 2>/dev/null) || true
-fi
-
-if [ -z "$YARR_RESULT" ] || echo "$YARR_RESULT" | grep -qi "error\|failed\|timeout\|not enough\|don't have enough\|wanna swap\|want me to"; then
-  log "Bankr YARR buy unclear — retrying with explicit WETH instruction"
-  YARR_RESULT=$(bankr_run "I have WETH on Base. Swap \$$YARR_USD of my WETH to YARR ($YARR_TOKEN_BASE) on Base via Clanker. Do it now." 2>/dev/null) || true
-fi
-
-if [ -z "$YARR_RESULT" ] || echo "$YARR_RESULT" | grep -qi "error\|failed\|timeout\|not enough\|wanna swap\|want me to"; then
-  log "YARR buy failed — YARR has no Uniswap v3 pool, skipping"
-  YARR_RESULT='{"status":"skipped","response":"YARR buy skipped — Clanker-only token, bankr unavailable"}'
-fi
-
-YARR_RESPONSE=$(echo "$YARR_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "YARR buy response: $YARR_RESPONSE"
-YARR_TOKENS=$(echo "$YARR_RESPONSE" | grep -oiE '[0-9]+(\.[0-9]+)?\s*YARR' | head -1 | grep -oE '[0-9]+(\.[0-9]+)?' || echo "")
-
-# ── Step 5d: Buy CLAWD on Base ────────────────────────────────────────────────
-log_section "Step 5d: Buy CLAWD (20%)"
-
-CLAWD_RESULT=""
-if [ "$DRY_RUN" = "false" ] && [ -f "$BANKR" ]; then
-  log "Attempting bankr for CLAWD buy..."
-  CLAWD_RESULT=$(bankr_run "Buy exactly \$$CLAWD_USD worth of CLAWD ($CLAWD_TOKEN_BASE) on Base. Use my WETH balance — I have WETH on Base. Execute the swap now without asking for confirmation." 2>/dev/null) || true
-fi
-
-if [ -z "$CLAWD_RESULT" ] || echo "$CLAWD_RESULT" | grep -qi "error\|failed\|timeout\|not enough\|don't have enough\|wanna swap\|want me to"; then
-  log "Bankr unavailable for CLAWD — using Uniswap v3 (WETH→CLAWD)"
-  CLAWD_RESULT=$(uniswap_swap "CLAWD" "$CLAWD_USD")
-fi
-
+# CLAWD (Uniswap v3)
+CLAWD_RESULT=$(uniswap_swap "CLAWD" "$CLAWD_USD")
 CLAWD_RESPONSE=$(echo "$CLAWD_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "CLAWD buy response: $CLAWD_RESPONSE"
 CLAWD_TOKENS=$(echo "$CLAWD_RESPONSE" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*CLAWD' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "")
+log "CLAWD buy: $CLAWD_RESPONSE"
 
-# ── Step 6: Buy RED (and burn only if >5% of supply) ──────────────────────────
-log_section "Step 6: Buy RED + conditional burn"
+# YARR (Clanker)
+YARR_RESULT=$(bankr_run "Buy exactly \$$YARR_USD worth of YARR ($YARR_TOKEN) on Base using WETH. Execute via Clanker pool.")
+YARR_RESPONSE=$(echo "$YARR_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
+YARR_TOKENS=$(echo "$YARR_RESPONSE" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*YARR' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "")
+log "YARR buy: $YARR_RESPONSE"
 
-BUY_RED_RESULT=""
-if [ "$DRY_RUN" = "false" ] && [ -f "$BANKR" ]; then
-  log "Attempting bankr for RED buy..."
-  BUY_RED_RESULT=$(bankr_run "Buy exactly \$$RED_USD worth of RED ($RED_TOKEN) on Base mainnet." 2>/dev/null) || true
-fi
+# ── Step 6: YARR burn check ───────────────────────────────────────────────────
+log_section "Step 6: YARR burn check"
 
-if [ -z "$BUY_RED_RESULT" ] || echo "$BUY_RED_RESULT" | grep -qi "error\|failed\|timeout"; then
-  log "Bankr unavailable for RED — using Uniswap v3 (WETH→RED)"
-  BUY_RED_RESULT=$(uniswap_swap "RED" "$RED_USD")
-fi
-
-BUY_RED_RESPONSE=$(echo "$BUY_RED_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-log "RED buy response: $BUY_RED_RESPONSE"
-RED_AMOUNT_RAW=$(echo "$BUY_RED_RESPONSE" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*RED' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "")
-RED_DISPLAY="${RED_AMOUNT_RAW:-unknown}"
-
-# Check if burn threshold met (>5% of total supply)
 BURN_ELIGIBLE="no"
 BURN_PCT="0"
-BURN_RESPONSE="Accumulating RED — burn threshold not reached"
+BURN_RESPONSE="Accumulating YARR — burn threshold not reached"
+YARR_DISPLAY="${YARR_TOKENS:-\$$YARR_USD worth}"
+
 if [ "$DRY_RUN" = "true" ]; then
-  log "[DRY RUN] Would check RED burn threshold — skipping"
+  log "[DRY RUN] Would check YARR burn threshold — skipping"
 else
-  THRESHOLD_CHECK=$(python3 "$SWAP_SCRIPT" check-burn 2>/dev/null || echo '{"data":{"eligible":false}}')
-  BURN_ELIGIBLE=$(echo "$THRESHOLD_CHECK" | jq -r '.data.eligible // false' 2>/dev/null || echo "false")
-  BURN_PCT=$(echo "$THRESHOLD_CHECK" | jq -r '.data.pct // 0' 2>/dev/null || echo "0")
-  log "RED burn eligibility: $BURN_ELIGIBLE (holding ${BURN_PCT}% of supply)"
-fi
-
-if [ "$BURN_ELIGIBLE" = "true" ]; then
-  # Only burn the excess above 5% — keep a ~5% floor
-  EXCESS_PCT=$(echo "$BURN_PCT 5" | awk '{printf "%.6f", $1 - $2}')
-  BURN_FRACTION=$(echo "$BURN_PCT $EXCESS_PCT" | awk '{printf "%.8f", $2 / $1}')
-  log "Holding ${BURN_PCT}% of supply — excess is ${EXCESS_PCT}% (burn fraction: $BURN_FRACTION)"
-
-  # Get current RED balance so we can calculate the exact burn amount
-  BALANCE_RESULT=$(bankr_run "What is my current RED token ($RED_TOKEN) balance on Base? Give me the exact token amount.")
-  BALANCE_RESPONSE=$(echo "$BALANCE_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-  RED_BALANCE=$(echo "$BALANCE_RESPONSE" | grep -oiE '[0-9,]+(\.[0-9]+)?\s*RED' | head -1 | grep -oE '[0-9,]+(\.[0-9]+)?' | tr -d ',' || echo "")
-
-  if [ -z "$RED_BALANCE" ]; then
-    log "WARN: Could not parse RED balance — skipping burn this run"
-    BURN_RESPONSE="Could not determine RED balance for partial burn"
-  else
-    BURN_AMOUNT=$(echo "$RED_BALANCE $BURN_FRACTION" | awk '{printf "%.0f", $1 * $2}')
-    KEEP_AMOUNT=$(echo "$RED_BALANCE $BURN_AMOUNT" | awk '{printf "%.0f", $1 - $2}')
-    log "🔥 Burning ${BURN_AMOUNT} RED (excess above 5% of supply) — keeping ${KEEP_AMOUNT} RED"
-    BURN_RESULT=$(bankr_run "Send exactly $BURN_AMOUNT RED ($RED_TOKEN) on Base to $BURN_ADDRESS")
+  # Check YARR supply percentage (would need to implement this check)
+  # For now, use bankr to query
+  SUPPLY_CHECK=$(bankr_run "What percentage of total YARR ($YARR_TOKEN) supply does my wallet hold on Base? Just give me the percentage number.")
+  BURN_PCT=$(echo "$SUPPLY_CHECK" | jq -r '.response // ""' 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)?' | head -1 || echo "0")
+  log "YARR supply %: $BURN_PCT"
+  
+  if [ "$(echo "$BURN_PCT $YARR_BURN_THRESHOLD_PCT" | awk '{print ($1 > $2) ? "yes" : "no"}')" = "yes" ]; then
+    BURN_ELIGIBLE="true"
+    EXCESS_PCT=$(echo "$BURN_PCT $YARR_BURN_THRESHOLD_PCT" | awk '{printf "%.2f", $1 - $2}')
+    log "🔥 Above ${YARR_BURN_THRESHOLD_PCT}% threshold — burning excess (${EXCESS_PCT}%)"
+    
+    BURN_RESULT=$(bankr_run "Burn the excess YARR ($YARR_TOKEN) above ${YARR_BURN_THRESHOLD_PCT}% of total supply. Send it to $BURN_ADDRESS on Base.")
     BURN_RESPONSE=$(echo "$BURN_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
     log "Burn response: $BURN_RESPONSE"
-    RED_DISPLAY="${BURN_AMOUNT} burned / ${KEEP_AMOUNT} kept"
+  else
+    log "Accumulating YARR (holding ${BURN_PCT}% — need >${YARR_BURN_THRESHOLD_PCT}% to burn)"
   fi
-else
-  log "Accumulating RED (not burning yet — need >5% of supply)"
 fi
 
-# ── Step 6b: Always swap 5% of WETH into treasury allocations ────────────────
+# ── Step 7: Always swap 5% of WETH into treasury allocations ─────────────────
 weth_allocation_swap
 
-# ── Step 7: Compose and post tweet ───────────────────────────────────────────
-log_section "Step 7: Tweet"
+# ── Step 8: Tweet ─────────────────────────────────────────────────────────────
+log_section "Step 8: Tweet"
 
-# Format RED amount with commas for readability
-if [ -n "$RED_AMOUNT_RAW" ]; then
-  RED_DISPLAY=$(echo "$RED_AMOUNT_RAW" | awk '{printf "%\047.0f", $1}' 2>/dev/null || echo "$RED_AMOUNT_RAW")
-fi
-
-GRT_DISPLAY="${GRT_TOKENS:-\$${GRT_USD} worth}"
-WBTC_DISPLAY="${WBTC_TOKENS:-\$${WBTC_USD} worth}"
-YARR_DISPLAY="${YARR_TOKENS:-\$${YARR_USD} worth}"
-CLAWD_DISPLAY="${CLAWD_TOKENS:-\$${CLAWD_USD} worth}"
+RED_DISPLAY="${RED_TOKENS:-\$$RED_USD worth}"
+GRT_DISPLAY="${GRT_TOKENS:-\$$GRT_USD worth}"
+WBTC_DISPLAY="${WBTC_TOKENS:-\$$WBTC_USD worth}"
+CLAWD_DISPLAY="${CLAWD_TOKENS:-\$$CLAWD_USD worth}"
 
 if [ "$BURN_ELIGIBLE" = "true" ]; then
-  TWEET="Burned the excess \$RED above my 5% floor 🔥
-${RED_DISPLAY} RED burned.
+  TWEET="🏴‍☠️ Claimed \$$CLAIMED_USD in \$YARR creator fees.
 
-Also stacked:
-⚓ ${GRT_DISPLAY} \$GRT
-⚓ ${WBTC_DISPLAY} \$WBTC
-⚓ ${YARR_DISPLAY} \$YARR
-⚓ ${CLAWD_DISPLAY} \$CLAWD
-
-Claimed \$$CLAIMED_USD in Clanker fees. Still hungry. 🤖
-
-\$RED \$GRT \$WBTC \$YARR \$CLAWD #DeFi #RedBotster"
-else
-  TWEET="Claimed \$$CLAIMED_USD in \$RED creator fees.
+Burned excess YARR above my ${YARR_BURN_THRESHOLD_PCT}% floor 🔥
 
 Stacked:
+⚓ ${RED_DISPLAY} \$RED
 ⚓ ${GRT_DISPLAY} \$GRT
 ⚓ ${WBTC_DISPLAY} \$WBTC
-⚓ ${YARR_DISPLAY} \$YARR
 ⚓ ${CLAWD_DISPLAY} \$CLAWD
-⚓ ${RED_DISPLAY} \$RED (accumulating to 10% supply)
+⚓ ${YARR_DISPLAY} \$YARR
 
-Holding ~${BURN_PCT}% of \$RED supply. 🤖🔥
+Treasury growing. 🤖
 
-\$RED \$GRT \$WBTC \$YARR \$CLAWD #DeFi #RedBotster"
+\$YARR \$RED \$GRT \$WBTC \$CLAWD #DeFi #Clawdmatey"
+else
+  TWEET="🏴‍☠️ Claimed \$$CLAIMED_USD in \$YARR creator fees.
+
+Stacked:
+⚓ ${RED_DISPLAY} \$RED
+⚓ ${GRT_DISPLAY} \$GRT
+⚓ ${WBTC_DISPLAY} \$WBTC
+⚓ ${CLAWD_DISPLAY} \$CLAWD
+⚓ ${YARR_DISPLAY} \$YARR
+
+Holding ~${BURN_PCT}% of \$YARR supply. 🤖
+
+\$YARR \$RED \$GRT \$WBTC \$CLAWD #DeFi #Clawdmatey"
 fi
 
 tweet "$TWEET"
 
-# ── Step 8: Update tracker ────────────────────────────────────────────────────
-log_section "Step 8: Update tracker"
+# ── Step 9: Update tracker ────────────────────────────────────────────────────
+log_section "Step 9: Update tracker"
 
-BURN_NOTE=$([ "$BURN_ELIGIBLE" = "true" ] && echo "BURNED ${RED_DISPLAY}" || echo "accumulating")
-SUMMARY="Claimed \$$CLAIMED_USD fees → GRT: ${GRT_DISPLAY} | WBTC: ${WBTC_DISPLAY} | YARR: ${YARR_DISPLAY} | CLAWD: ${CLAWD_DISPLAY} | RED: ${RED_DISPLAY} (${BURN_NOTE})"
+BURN_NOTE=$([ "$BURN_ELIGIBLE" = "true" ] && echo "BURNED excess" || echo "accumulating")
+SUMMARY="Claimed \$$CLAIMED_USD fees → RED: ${RED_DISPLAY} | GRT: ${GRT_DISPLAY} | WBTC: ${WBTC_DISPLAY} | CLAWD: ${CLAWD_DISPLAY} | YARR: ${YARR_DISPLAY} (${BURN_NOTE})"
 update_tracker "$SUMMARY"
-write_run_summary "fee-claim" "$CLAIMED_USD" "${GRT_DISPLAY}" "${WBTC_DISPLAY}" "${YARR_DISPLAY}" "${CLAWD_DISPLAY}" "${RED_DISPLAY}" "5% of WETH" "$BURN_NOTE"
+write_run_summary "fee-claim" "$CLAIMED_USD" "${RED_DISPLAY}" "${GRT_DISPLAY}" "${WBTC_DISPLAY}" "${CLAWD_DISPLAY}" "${YARR_DISPLAY}" "5% of WETH" "$BURN_NOTE"
 log "Tracker updated."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 log_section "DONE"
 log "Run complete. See $LOGFILE for full output."
 echo ""
-echo "✅ RedBotster automation complete:"
+echo "✅ Clawdmatey automation complete:"
 echo "   Claimed: \$$CLAIMED_USD"
+echo "   RED:     ${RED_DISPLAY}"
 echo "   GRT:     ${GRT_DISPLAY}"
 echo "   WBTC:    ${WBTC_DISPLAY}"
-echo "   RED:     ${RED_DISPLAY} ($([ "$BURN_ELIGIBLE" = "true" ] && echo "BURNED" || echo "accumulating"))"
+echo "   CLAWD:   ${CLAWD_DISPLAY}"
+echo "   YARR:    ${YARR_DISPLAY} ($([ "$BURN_ELIGIBLE" = "true" ] && echo "BURNED" || echo "accumulating"))"
