@@ -4,7 +4,7 @@
 # Flow:
 #   1. Check fees via `bankr fees <wallet>`
 #   2. If above threshold, claim via Bankr natural language
-#   3. Split into portfolio: 20% each RED/GRT/WBTC/CLAWD/YARR
+#   3. Split into portfolio: 20% each RED/WBTC/CLAWD/YARR + 20% WETH reserve
 #
 # Usage: ./treasury-bot.sh [--dry-run]
 
@@ -15,11 +15,11 @@ CREATOR_WALLET="0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633"
 YARR_TOKEN="0x309792e8950405f803c0e3f2c9083bdff4466ba3"
 MIN_THRESHOLD_USD=10
 
-# Portfolio tokens
+# Portfolio tokens (all Base native)
 RED_TOKEN="0x2e662015a501f066e043d64d04f77ffe551a4b07"
-GRT_TOKEN="0x9623063377AD1B27544C965cCd7342f7EA7e88C7"  # Arbitrum
 WBTC_TOKEN="0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"
 CLAWD_TOKEN="0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07"
+# WETH = 20% kept as reserve (no swap needed)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$(dirname "$SCRIPT_DIR")/logs"
@@ -87,25 +87,30 @@ fi
 CLAIMED_USD=$(echo "$CLAIMED_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
 log "Claimed: \$$CLAIMED_USD"
 
-# ── Step 4: Calculate splits (20% each) ───────────────────────────────────────
+# ── Step 4: Calculate splits (20% each, 4 tokens + WETH reserve) ──────────────
+# 80% swapped to tokens, 20% kept as WETH
+SWAP_USD=$(echo "$CLAIMED_USD" | awk '{printf "%.2f", $1 * 0.8}')
 SPLIT_USD=$(echo "$CLAIMED_USD" | awk '{printf "%.2f", $1 / 5}')
-log "Split: \$$SPLIT_USD each to RED, GRT, WBTC, CLAWD, YARR"
+WETH_RESERVE=$(echo "$CLAIMED_USD" | awk '{printf "%.2f", $1 * 0.2}')
+log "Split: \$$SPLIT_USD each to RED, WBTC, CLAWD, YARR | \$$WETH_RESERVE WETH reserve"
 
 # ── Step 5: Buy portfolio tokens (batched single call) ───────────────────────
 if [ "$DRY_RUN" = "true" ]; then
-  log "[DRY RUN] Would buy \$$SPLIT_USD each of RED, GRT, WBTC, CLAWD, YARR"
+  log "[DRY RUN] Would buy \$$SPLIT_USD each of RED, WBTC, CLAWD, YARR"
+  log "[DRY RUN] Would keep \$$WETH_RESERVE as WETH reserve"
 else
-  log "Buying all 5 tokens in single batch..."
-  BUY_RESULT=$(bankr "Execute these 5 buys using WETH on Base:
-1. Buy \$$SPLIT_USD of RED ($RED_TOKEN) on Base
-2. Buy \$$SPLIT_USD of GRT ($GRT_TOKEN) on Arbitrum (bridge if needed)
-3. Buy \$$SPLIT_USD of WBTC ($WBTC_TOKEN) on Base
-4. Buy \$$SPLIT_USD of CLAWD ($CLAWD_TOKEN) on Base
-5. Buy \$$SPLIT_USD of YARR ($YARR_TOKEN) on Base
+  log "Buying 4 tokens in single batch (keeping 20% WETH)..."
+  BUY_RESULT=$(bankr "Execute these 4 buys using WETH on Base. Keep 20% of WETH as reserve (don't swap it).
 
-Execute all 5 transactions. Use Clanker pools where available. Report results." 2>&1 || true)
+Swap 80% of available WETH into:
+1. Buy \$$SPLIT_USD of RED ($RED_TOKEN) on Base
+2. Buy \$$SPLIT_USD of WBTC ($WBTC_TOKEN) on Base  
+3. Buy \$$SPLIT_USD of CLAWD ($CLAWD_TOKEN) on Base
+4. Buy \$$SPLIT_USD of YARR ($YARR_TOKEN) on Base
+
+Execute all 4 transactions. Use Clanker pools where available. Report results." 2>&1 || true)
   log "Batch buy result: $(echo "$BUY_RESULT" | tail -10)"
 fi
 
 log "═══ TREASURY BOT COMPLETE ═══"
-log "Claimed: \$$CLAIMED_USD | Split: \$$SPLIT_USD x5"
+log "Claimed: \$$CLAIMED_USD | Swapped: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
