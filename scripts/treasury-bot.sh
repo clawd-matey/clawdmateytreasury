@@ -511,6 +511,7 @@ CLAWD \$${TREASURY_CLAWD_USD} | WBTC \$${TREASURY_WBTC_USD}
 fi
 
 # ── Step 9: Update TRANSACTIONS.md and push to GitHub ─────────────────────────
+log "Starting Step 9: Update TRANSACTIONS.md..."
 if [ "$DRY_RUN" = "false" ]; then
   REPO_DIR="$(dirname "$SCRIPT_DIR")"
   TX_LOG="$REPO_DIR/TRANSACTIONS.md"
@@ -573,7 +574,12 @@ if [ "$DRY_RUN" = "false" ]; then
   cd "$REPO_DIR"
   git add TRANSACTIONS.md
   git commit -m "tx: $TIME - claimed $CLAIMED_WETH WETH (\$$CLAIMED_USD)" 2>/dev/null || true
-  git push origin main 2>/dev/null || log "⚠️ Failed to push tx log"
+  log "Pushing to GitHub..."
+  if git push origin main 2>&1; then
+    log "✅ Pushed TRANSACTIONS.md to GitHub"
+  else
+    log "⚠️ Failed to push tx log"
+  fi
   
-  log "📝 Transaction logged to TRANSACTIONS.md"
+  log "📝 Step 9 complete"
 fi
