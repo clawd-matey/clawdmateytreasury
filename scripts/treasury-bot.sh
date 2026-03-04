@@ -378,20 +378,44 @@ Claimed: ${YARR_MILLIONS} \$YARR"
   [ "$YARR_BURNED" != "0" ] && TWEET="$TWEET
 🔥 Burned: $YARR_BURNED"
   
-  # Get current treasury balances
-  TREASURY_YARR=$(get_erc20_balance "$YARR_TOKEN" "$TREASURY_WALLET")
-  TREASURY_YARR_FMT=$(fmt_num $TREASURY_YARR)
+  # Get current treasury balances (with correct decimals)
+  get_balance_decimals() {
+    local TOKEN=$1
+    local WALLET=$2
+    local DECIMALS=$3
+    local PADDED=$(printf '%064s' "${WALLET:2}" | tr ' ' '0')
+    local HEX=$(curl -s -X POST "https://mainnet.base.org" \
+      -H "Content-Type: application/json" \
+      -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231$PADDED\"},\"latest\"],\"id\":1}" \
+      | grep -oE '"result":"0x[0-9a-fA-F]+"' | cut -d'"' -f4)
+    python3 -c "print(int('${HEX}', 16) / 10**$DECIMALS)" 2>/dev/null || echo "0"
+  }
   
-  # Get WETH balance (WETH on Base = 0x4200000000000000000000000000000000000006)
   WETH_TOKEN="0x4200000000000000000000000000000000000006"
-  TREASURY_WETH=$(get_erc20_balance "$WETH_TOKEN" "$TREASURY_WALLET")
-  TREASURY_WETH_FMT=$(fmt_weth $TREASURY_WETH)
+  
+  TREASURY_YARR=$(get_balance_decimals "$YARR_TOKEN" "$TREASURY_WALLET" 18)
+  TREASURY_RED=$(get_balance_decimals "$RED_TOKEN" "$TREASURY_WALLET" 18)
+  TREASURY_CLAWD=$(get_balance_decimals "$CLAWD_TOKEN" "$TREASURY_WALLET" 18)
+  TREASURY_WBTC=$(get_balance_decimals "$WBTC_TOKEN" "$TREASURY_WALLET" 8)
+  TREASURY_ETH=$(curl -s -X POST "https://mainnet.base.org" \
+    -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBalance\",\"params\":[\"$TREASURY_WALLET\",\"latest\"],\"id\":1}" \
+    | grep -oE '"result":"0x[0-9a-fA-F]+"' | cut -d'"' -f4 | xargs -I{} python3 -c "print(int('{}', 16) / 10**18)")
+  
+  # Format for tweet
+  TREASURY_YARR_FMT=$(fmt_num $TREASURY_YARR)
+  TREASURY_RED_FMT=$(fmt_num $TREASURY_RED)
+  TREASURY_CLAWD_FMT=$(fmt_num $TREASURY_CLAWD)
+  TREASURY_WBTC_FMT=$(python3 -c "print(f'{$TREASURY_WBTC:.6f}')")
+  TREASURY_ETH_FMT=$(python3 -c "print(f'{$TREASURY_ETH:.4f}')")
   
   TWEET="$TWEET
 
-💰 Treasury: ${TREASURY_YARR_FMT} YARR + ${TREASURY_WETH_FMT} WETH
-📊 Today: ${DAY_YARR_FMT} YARR + ${DAY_WETH_FMT} WETH
-📈 Week: ${WEEK_YARR_FMT} YARR + ${WEEK_WETH_FMT} WETH"
+💰 Treasury totals:
+${TREASURY_YARR_FMT} YARR | ${TREASURY_RED_FMT} RED
+${TREASURY_CLAWD_FMT} CLAWD | ${TREASURY_WBTC_FMT} WBTC
+
+📊 Today: +${DAY_YARR_FMT} YARR +${DAY_WETH_FMT} WETH"
   
   log "Tweeting update..."
   TWEET_RESULT=$(bird tweet "$TWEET" 2>&1 || true)
