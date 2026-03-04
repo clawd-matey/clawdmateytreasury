@@ -435,7 +435,9 @@ Claimed: ${YARR_MILLIONS} \$YARR"
 YARR \$${TREASURY_YARR_USD} | RED \$${TREASURY_RED_USD}
 CLAWD \$${TREASURY_CLAWD_USD} | WBTC \$${TREASURY_WBTC_USD}
 
-📊 Today: +${DAY_YARR_FMT} YARR +${DAY_WETH_FMT} WETH"
+📊 Today: +${DAY_YARR_FMT} YARR +${DAY_WETH_FMT} WETH
+
+@scallywaglabs @redbotster @claboratories"
   
   log "Tweeting update..."
   TWEET_RESULT=$(bird tweet "$TWEET" 2>&1 || true)
