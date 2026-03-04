@@ -293,26 +293,75 @@ log "Claimed: $CLAIMED_WETH WETH + YARR (accumulated)"
 log "YARR burned: $YARR_BURNED | WETH diversified: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
 log "Tokens (RED, WBTC, CLAWD) sent to clawd-matey.eth"
 
+# ── Track cumulative stats ────────────────────────────────────────────────────
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+STATS_FILE="$REPO_DIR/stats.json"
+TODAY=$(date +%Y-%m-%d)
+THIS_WEEK=$(date +%Y-W%V)
+THIS_MONTH=$(date +%Y-%m)
+
+# Initialize or load stats
+if [ -f "$STATS_FILE" ]; then
+  STATS=$(cat "$STATS_FILE")
+else
+  STATS='{"daily":{},"weekly":{},"monthly":{}}'
+fi
+
+# Update stats with this claim
+update_stats() {
+  local YARR_AMT=${CLAIMABLE_YARR:-0}
+  local WETH_AMT=${CLAIMED_WETH:-0}
+  local USD_AMT=${CLAIMED_USD:-0}
+  
+  python3 << EOF
+import json
+stats = $STATS
+for period, key in [("daily", "$TODAY"), ("weekly", "$THIS_WEEK"), ("monthly", "$THIS_MONTH")]:
+    if key not in stats[period]:
+        stats[period][key] = {"yarr": 0, "weth": 0, "usd": 0, "claims": 0}
+    stats[period][key]["yarr"] += $YARR_AMT
+    stats[period][key]["weth"] += $WETH_AMT
+    stats[period][key]["usd"] += $USD_AMT
+    stats[period][key]["claims"] += 1
+print(json.dumps(stats, indent=2))
+EOF
+}
+
+STATS=$(update_stats)
+echo "$STATS" > "$STATS_FILE"
+
+# Get cumulative totals for tweet
+DAY_YARR=$(echo "$STATS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('daily',{}).get('$TODAY',{}).get('yarr',0))")
+DAY_USD=$(echo "$STATS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"{d.get('daily',{}).get('$TODAY',{}).get('usd',0):.2f}\")")
+WEEK_YARR=$(echo "$STATS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('weekly',{}).get('$THIS_WEEK',{}).get('yarr',0))")
+MONTH_YARR=$(echo "$STATS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('monthly',{}).get('$THIS_MONTH',{}).get('yarr',0))")
+
+# Format numbers nicely
+fmt_yarr() { python3 -c "v=$1; print(f'{v/1e6:.1f}M' if v>=1e6 else f'{v/1e3:.1f}K' if v>=1e3 else f'{v:.0f}')"; }
+DAY_YARR_FMT=$(fmt_yarr $DAY_YARR)
+WEEK_YARR_FMT=$(fmt_yarr $WEEK_YARR)
+MONTH_YARR_FMT=$(fmt_yarr $MONTH_YARR)
+
 # ── Tweet update ──────────────────────────────────────────────────────────────
 if [ "$DRY_RUN" = "false" ]; then
-  # Format YARR amount nicely (millions)
   YARR_MILLIONS=$(echo "$CLAIMABLE_YARR" | awk '{printf "%.1fM", $1/1000000}')
   
-  # Build tweet
-  TWEET="🏴‍☠️ Treasury update
+  TWEET="🤖 [auto] Treasury update
 
 Claimed: ${YARR_MILLIONS} \$YARR"
   
-  [ "$CLAIMED_WETH" != "0" ] && TWEET="$TWEET + $CLAIMED_WETH WETH (~\$$CLAIMED_USD)"
+  [ "$CLAIMED_WETH" != "0" ] && [ "$CLAIMED_WETH" != "0.000000" ] && TWEET="$TWEET + $CLAIMED_WETH WETH"
   
   TWEET="$TWEET
-→ YARR sent to treasury"
+→ Sent to clawd-matey.eth"
   
   [ "$YARR_BURNED" != "0" ] && TWEET="$TWEET
-🔥 Burned: $YARR_BURNED YARR"
+🔥 Burned: $YARR_BURNED"
   
-  [ "$BOUGHT" -gt 0 ] && TWEET="$TWEET
-→ WETH split: RED, WBTC, CLAWD"
+  TWEET="$TWEET
+
+📊 Today: ${DAY_YARR_FMT} YARR (~\$${DAY_USD})
+📈 This week: ${WEEK_YARR_FMT} | Month: ${MONTH_YARR_FMT}"
   
   log "Tweeting update..."
   TWEET_RESULT=$(bird tweet "$TWEET" 2>&1 || true)
