@@ -1,11 +1,11 @@
 #!/bin/bash
-# Clawdmatey Treasury Bot — Stability-First Strategy
+# Clawdmatey Treasury Bot — Accumulate & Burn Strategy (like RedBotster)
 #
 # Flow:
 #   1. Check fees via `bankr fees <wallet>`
 #   2. If above threshold, claim via Bankr (gets WETH + YARR)
-#   3. Sell all claimed YARR for WETH (reduce volatility exposure)
-#   4. Split total WETH: 25% each RED/WBTC/CLAWD + 25% WETH reserve
+#   3. Keep YARR (accumulate) — if > 5% supply, burn excess
+#   4. Split WETH: 25% each RED/WBTC/CLAWD + 25% WETH reserve
 #   5. Send tokens to clawd-matey.eth (public treasury)
 #
 # Usage: ./treasury-bot.sh [--dry-run]
@@ -21,11 +21,16 @@ MIN_THRESHOLD_USD=10
 # Public treasury wallet (clawd-matey.eth)
 TREASURY_WALLET="0xdb784e1Dce8b11CC45b5228E9Ae48B03bDeFD1D9"
 
-# Portfolio tokens (all Base native) — NO YARR (we sell YARR fees for stability)
+# Portfolio tokens (all Base native)
 RED_TOKEN="0x2e662015a501f066e043d64d04f77ffe551a4b07"
 WBTC_TOKEN="0x0555E30da8f98308EdB960aa94C0Db47230d2B9c"
 CLAWD_TOKEN="0x9f86dB9fc6f7c9408e8Fda3Ff8ce4e78ac7a6b07"
-# Split: 25% RED, 25% WBTC, 25% CLAWD, 25% WETH reserve
+# YARR = accumulated, burned if > 5% supply
+# Split WETH: 25% RED, 25% WBTC, 25% CLAWD, 25% WETH reserve
+
+# Burn address (standard dead address)
+BURN_ADDRESS="0x000000000000000000000000000000000000dEaD"
+BURN_THRESHOLD_PCT=5  # Burn YARR if wallet holds > 5% of supply
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$(dirname "$SCRIPT_DIR")/logs"
@@ -98,31 +103,58 @@ fi
 CLAIMED_USD=$(echo "$CLAIMED_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
 log "Claimed WETH: \$$CLAIMED_USD"
 
-# ── Step 4: Sell claimed YARR for WETH (reduce volatility exposure) ───────────
-YARR_SOLD_WETH="0"
+# ── Step 4: Check YARR balance and burn if > 5% supply ────────────────────────
+YARR_BURNED="0"
 if [ "$DRY_RUN" = "true" ]; then
-  log "[DRY RUN] Would sell claimed YARR for WETH"
+  log "[DRY RUN] Would check YARR balance vs 5% supply threshold"
 else
-  log "Selling claimed YARR for WETH..."
-  SELL_RESULT=$(bankr "Sell all my YARR ($YARR_TOKEN) on Base for WETH. Execute the swap and confirm the tx hash." 2>&1 || true)
+  log "Checking YARR balance vs supply threshold..."
   
-  if echo "$SELL_RESULT" | grep -qiE "(tx|transaction|hash|success|sold|swapped|0x[a-f0-9]{64})"; then
-    log "✅ YARR sold for WETH"
-    # Try to extract WETH amount received (rough parse)
-    YARR_SOLD_WETH=$(echo "$SELL_RESULT" | grep -oiE "[0-9]+\.[0-9]+ weth" | head -1 | grep -oE "[0-9]+\.[0-9]+" || echo "0")
-    log "YARR sale added ~$YARR_SOLD_WETH WETH"
+  # Get wallet YARR balance and total supply via Bankr
+  YARR_CHECK=$(bankr "What is my YARR ($YARR_TOKEN) balance on Base, and what is the total supply of YARR? Give me both numbers." 2>&1 || true)
+  log "YARR check: $(echo "$YARR_CHECK" | tail -5)"
+  
+  # Try to parse balance and supply (rough extraction)
+  YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "[0-9,]+\.?[0-9]* yarr" | head -1 | tr -d ',' | grep -oE "^[0-9.]+" || echo "0")
+  YARR_SUPPLY=$(echo "$YARR_CHECK" | grep -oiE "supply[^0-9]*[0-9,]+" | grep -oE "[0-9,]+" | tr -d ',' || echo "1000000000")
+  
+  if [ "$YARR_BALANCE" != "0" ] && [ "$YARR_SUPPLY" != "0" ]; then
+    # Calculate percentage
+    YARR_PCT=$(echo "$YARR_BALANCE $YARR_SUPPLY" | awk '{printf "%.2f", ($1 / $2) * 100}')
+    log "YARR balance: $YARR_BALANCE / $YARR_SUPPLY supply = $YARR_PCT%"
+    
+    # Check if above threshold
+    ABOVE_BURN=$(echo "$YARR_PCT $BURN_THRESHOLD_PCT" | awk '{print ($1 > $2) ? "yes" : "no"}')
+    
+    if [ "$ABOVE_BURN" = "yes" ]; then
+      log "🔥 Above $BURN_THRESHOLD_PCT% threshold — burning excess YARR..."
+      
+      # Calculate target (5% of supply) and excess
+      TARGET_BALANCE=$(echo "$YARR_SUPPLY $BURN_THRESHOLD_PCT" | awk '{printf "%.0f", $1 * $2 / 100}')
+      EXCESS=$(echo "$YARR_BALANCE $TARGET_BALANCE" | awk '{printf "%.0f", $1 - $2}')
+      
+      log "Burning $EXCESS YARR (keeping $TARGET_BALANCE = 5%)"
+      
+      BURN_RESULT=$(bankr "Send $EXCESS YARR ($YARR_TOKEN) on Base to the burn address $BURN_ADDRESS. Execute the transfer." 2>&1 || true)
+      
+      if echo "$BURN_RESULT" | grep -qiE "(tx|transaction|hash|success|sent|0x[a-f0-9]{64})"; then
+        log "🔥 YARR burned successfully"
+        YARR_BURNED="$EXCESS"
+      else
+        log "⚠️ YARR burn may have failed: $(echo "$BURN_RESULT" | tail -3)"
+      fi
+    else
+      log "✅ YARR balance ($YARR_PCT%) below $BURN_THRESHOLD_PCT% threshold — keeping"
+    fi
   else
-    log "⚠️ YARR sale may have failed (continuing with WETH only): $(echo "$SELL_RESULT" | tail -3)"
+    log "⚠️ Could not parse YARR balance/supply — skipping burn check"
   fi
 fi
 
-# Calculate total WETH (claimed + YARR sale proceeds)
-TOTAL_WETH=$(echo "$CLAIMED_WETH $YARR_SOLD_WETH" | awk '{printf "%.6f", $1 + $2}')
-TOTAL_USD=$(echo "$TOTAL_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
-log "Total WETH after YARR sale: $TOTAL_WETH (~\$$TOTAL_USD)"
-
 # ── Step 5: Calculate splits (25% each: RED, WBTC, CLAWD, WETH reserve) ───────
-# 75% swapped to tokens, 25% kept as WETH
+# Using only WETH for diversification (YARR is accumulated separately)
+TOTAL_WETH="$CLAIMED_WETH"
+TOTAL_USD="$CLAIMED_USD"
 SWAP_USD=$(echo "$TOTAL_USD" | awk '{printf "%.2f", $1 * 0.75}')
 SPLIT_USD=$(echo "$TOTAL_USD" | awk '{printf "%.2f", $1 / 4}')
 WETH_RESERVE=$(echo "$TOTAL_USD" | awk '{printf "%.2f", $1 * 0.25}')
@@ -208,8 +240,8 @@ else
 fi
 
 log "═══ TREASURY BOT COMPLETE ═══"
-log "Claimed: $CLAIMED_WETH WETH + sold YARR for ~$YARR_SOLD_WETH WETH"
-log "Total: \$$TOTAL_USD | Swapped: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
+log "Claimed: $CLAIMED_WETH WETH + YARR (accumulated)"
+log "YARR burned: $YARR_BURNED | WETH diversified: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
 log "Tokens (RED, WBTC, CLAWD) sent to clawd-matey.eth"
 
 # ── Step 8: Update TRANSACTIONS.md and push to GitHub ─────────────────────────
@@ -232,11 +264,16 @@ if [ "$DRY_RUN" = "false" ]; then
   fi
   
   # Create entry
+  BURN_NOTE=""
+  if [ "$YARR_BURNED" != "0" ]; then
+    BURN_NOTE=" | 🔥 Burned: $YARR_BURNED YARR"
+  fi
+  
   ENTRY="### Run: $TIME
-**Claimed:** $CLAIMED_WETH WETH + YARR → sold for ~$YARR_SOLD_WETH WETH  
-**Total:** ~\$$TOTAL_USD | **Claim Tx:** [${CLAIM_TX:0:9}...](https://basescan.org/tx/$CLAIM_TX)  
-**Buys:** $BOUGHT/3 (RED, WBTC, CLAWD) | **Transfers:** $TRANSFERRED/3  
-**Status:** $STATUS
+**Claimed:** $CLAIMED_WETH WETH + YARR (accumulated)$BURN_NOTE  
+**WETH Split:** ~\$$TOTAL_USD → \$$SPLIT_USD each to RED/WBTC/CLAWD  
+**Claim Tx:** [${CLAIM_TX:0:9}...](https://basescan.org/tx/$CLAIM_TX)  
+**Buys:** $BOUGHT/3 | **Transfers:** $TRANSFERRED/3 | **Status:** $STATUS
 
 "
 
