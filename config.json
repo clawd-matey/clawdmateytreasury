@@ -1,4 +1,5 @@
 {
+  "creatorWallet": "0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633",
   "minThresholdUSD": 10,
   "wethFallbackMin": 1,
   "redSplitPct": 20,
