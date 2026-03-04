@@ -111,12 +111,27 @@ else
   log "Checking YARR balance vs supply threshold..."
   
   # Get wallet YARR balance and total supply via Bankr
-  YARR_CHECK=$(bankr "What is my YARR ($YARR_TOKEN) balance on Base, and what is the total supply of YARR? Give me both numbers." 2>&1 || true)
-  log "YARR check: $(echo "$YARR_CHECK" | tail -5)"
+  YARR_CHECK=$(bankr "Check my YARR token balance on Base (token: $YARR_TOKEN). Also tell me the total supply. Format: BALANCE: <number> SUPPLY: <number>" 2>&1 || true)
+  log "YARR check: $(echo "$YARR_CHECK" | tail -10)"
   
-  # Try to parse balance and supply (rough extraction)
-  YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "[0-9,]+\.?[0-9]* yarr" | head -1 | tr -d ',' | grep -oE "^[0-9.]+" || echo "0")
-  YARR_SUPPLY=$(echo "$YARR_CHECK" | grep -oiE "supply[^0-9]*[0-9,]+" | grep -oE "[0-9,]+" | tr -d ',' || echo "1000000000")
+  # Try multiple parsing strategies
+  # Strategy 1: Look for explicit BALANCE/SUPPLY format
+  YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "balance[:\s]*[0-9,.]+" | grep -oE "[0-9,.]+" | tr -d ',' | head -1 || echo "")
+  YARR_SUPPLY=$(echo "$YARR_CHECK" | grep -oiE "supply[:\s]*[0-9,.]+" | grep -oE "[0-9,.]+" | tr -d ',' | head -1 || echo "")
+  
+  # Strategy 2: Look for numbers followed by YARR
+  if [ -z "$YARR_BALANCE" ]; then
+    YARR_BALANCE=$(echo "$YARR_CHECK" | grep -oiE "[0-9,]+\.?[0-9]*\s*yarr" | head -1 | grep -oE "^[0-9,.]+" | tr -d ',' || echo "0")
+  fi
+  
+  # Strategy 3: Default supply to 1B if not found (standard Clanker supply)
+  if [ -z "$YARR_SUPPLY" ]; then
+    YARR_SUPPLY="1000000000"
+    log "Using default supply: 1B YARR"
+  fi
+  
+  # Ensure we have numbers
+  [ -z "$YARR_BALANCE" ] && YARR_BALANCE="0"
   
   if [ "$YARR_BALANCE" != "0" ] && [ "$YARR_SUPPLY" != "0" ]; then
     # Calculate percentage
@@ -277,15 +292,21 @@ if [ "$DRY_RUN" = "false" ]; then
 
 "
 
-  # Check if today's header exists, if not add it
+  # Use awk for reliable multiline insertion
+  TEMP_LOG=$(mktemp)
+  
   if ! grep -q "## $TODAY" "$TX_LOG" 2>/dev/null; then
-    # Insert after the --- line (after header)
-    sed -i '' "s/^---$/---\n\n## $TODAY\n/" "$TX_LOG"
+    # Add today's header after the first ---
+    awk -v today="## $TODAY" 'NR==1,/^---$/{if(/^---$/) print $0 "\n\n" today; else print; next} 1' "$TX_LOG" > "$TEMP_LOG"
+    mv "$TEMP_LOG" "$TX_LOG"
   fi
   
-  # Append entry after today's date header
-  sed -i '' "/## $TODAY/a\\
-$ENTRY" "$TX_LOG"
+  # Insert entry after today's date header
+  awk -v today="## $TODAY" -v entry="$ENTRY" '
+    $0 == today { print; print ""; print entry; next }
+    1
+  ' "$TX_LOG" > "$TEMP_LOG"
+  mv "$TEMP_LOG" "$TX_LOG"
   
   # Commit and push
   cd "$REPO_DIR"
