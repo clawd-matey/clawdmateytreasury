@@ -282,30 +282,37 @@ ETH_PRICE=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&
   | jq -r '.ethereum.usd' 2>/dev/null || echo "2000")
 log "ETH price: \$$ETH_PRICE"
 
-# ── Step 1: Check YARR fee balance ────────────────────────────────────────────
-log_section "Step 1: Check Clanker fee balance for YARR"
+# ── Step 1: Check YARR fee balance (BOTH v3 and v4 systems) ──────────────────
+log_section "Step 1: Check ALL fee systems (v4 ClankerFeeLocker + v3 Bankr)"
 
-# Try direct check first (v4), fall back to Bankr (v3)
+# Use unified check-all-fees.py which checks BOTH systems
+CHECK_ALL_SCRIPT="$SCRIPT_DIR/check-all-fees.py"
 AVAILABLE_USD=""
-if [ "$FEE_CLAIM_MODE" = "direct" ] && [ -f "$CLANKER_FEES_SCRIPT" ]; then
-  log "Attempting direct fee check (v4)..."
-  FEE_OWNER="${YARR_CREATOR:-0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633}"
-  CHECK_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" check --fee-owner "$FEE_OWNER" --token YARR 2>>"$LOGFILE") || true
-  CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-  AVAILABLE_USD=$(echo "$CHECK_RESULT" | jq -r '.data.total_usd // 0' 2>/dev/null || echo "0")
-  log "Direct check result: \$$AVAILABLE_USD"
-fi
+V4_USD=""
+V3_USD=""
 
-# Fall back to Bankr for v3 tokens
-if [ -z "$AVAILABLE_USD" ] || [ "$AVAILABLE_USD" = "0" ] || [ "$FEE_CLAIM_MODE" = "bankr" ]; then
-  log "Using Bankr for fee check (v3 token)..."
+if [ -f "$CHECK_ALL_SCRIPT" ]; then
+  log "Running unified fee check (v4 + v3)..."
+  CHECK_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CHECK_ALL_SCRIPT" 2>>"$LOGFILE") || true
+  
+  # Parse JSON output
+  AVAILABLE_USD=$(echo "$CHECK_RESULT" | jq -r '.total_usd // 0' 2>/dev/null || echo "0")
+  V4_USD=$(echo "$CHECK_RESULT" | jq -r '.v4_usd // 0' 2>/dev/null || echo "0")
+  V3_USD=$(echo "$CHECK_RESULT" | jq -r '.v3_usd // 0' 2>/dev/null || echo "0")
+  
+  log "Fee check results:"
+  log "  v4 (ClankerFeeLocker): \$$V4_USD"
+  log "  v3 (Bankr/LpLockerv2): \$$V3_USD"
+  log "  TOTAL: \$$AVAILABLE_USD"
+else
+  log "WARNING: check-all-fees.py not found, falling back to Bankr only"
   CHECK_RESULT=$(bankr_run "Check my current unclaimed Clanker creator fee balance for YARR token ($YARR_TOKEN) on Base. Show me the total USD value available to claim.")
   CHECK_RESPONSE=$(echo "$CHECK_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
   log "Bankr response: $CHECK_RESPONSE"
   AVAILABLE_USD=$(parse_usd "$CHECK_RESPONSE")
 fi
 
-log "Parsed available: \$$AVAILABLE_USD"
+log "Total available to claim: \$$AVAILABLE_USD"
 
 NO_FEES=false
 if [ -z "$AVAILABLE_USD" ] || [ "$(echo "$AVAILABLE_USD" | awk '{print ($1 <= 0) ? "yes" : "no"}')" = "yes" ]; then
@@ -337,32 +344,35 @@ if [ "$ABOVE" = "no" ]; then
 fi
 log "\$$AVAILABLE_USD >= threshold \$$MIN_THRESHOLD — proceeding."
 
-# ── Step 3: Claim fees ────────────────────────────────────────────────────────
+# ── Step 3: Claim fees (from both systems as needed) ─────────────────────────
 log_section "Step 3: Claim YARR Clanker fees"
 
-CLAIMED_USD=""
+CLAIMED_USD="0"
+CREATOR_WALLET=$(jq -r '.creatorWallet // "0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633"' "$CONFIG_FILE")
 
-# Try direct claim first (v4), fall back to Bankr (v3)
-if [ "$FEE_CLAIM_MODE" = "direct" ] && [ -f "$CLANKER_FEES_SCRIPT" ]; then
-  log "Attempting direct fee claim (v4)..."
-  FEE_OWNER="${YARR_CREATOR:-0x8b59a7e24386d2265e9dfd6de59b4a6bbd5d1633}"
+# Claim v4 fees if present
+if [ -n "$V4_USD" ] && [ "$(echo "$V4_USD" | awk '{print ($1 > 0) ? "yes" : "no"}')" = "yes" ]; then
+  log "Claiming v4 fees (\$$V4_USD) via ClankerFeeLocker..."
   if [ "$DRY_RUN" = "true" ]; then
-    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$FEE_OWNER" --token YARR --dry-run 2>>"$LOGFILE") || true
+    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$CREATOR_WALLET" --token YARR --dry-run 2>>"$LOGFILE") || true
   else
-    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$FEE_OWNER" --token YARR 2>>"$LOGFILE") || true
+    CLAIM_RESULT=$(cd "$PROJECT_DIR" && source venv/bin/activate 2>/dev/null && python3 "$CLANKER_FEES_SCRIPT" claim --fee-owner "$CREATOR_WALLET" --token YARR 2>>"$LOGFILE") || true
   fi
-  CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
-  CLAIMED_USD=$(echo "$CLAIM_RESULT" | jq -r '.data.total_usd // 0' 2>/dev/null || echo "0")
-  log "Direct claim result: \$$CLAIMED_USD"
+  V4_CLAIMED=$(echo "$CLAIM_RESULT" | jq -r '.data.total_usd // 0' 2>/dev/null || echo "0")
+  log "v4 claimed: \$$V4_CLAIMED"
+  CLAIMED_USD=$(echo "$CLAIMED_USD $V4_CLAIMED" | awk '{printf "%.2f", $1 + $2}')
 fi
 
-# Fall back to Bankr for v3 tokens
-if [ -z "$CLAIMED_USD" ] || [ "$CLAIMED_USD" = "0" ] || [ "$FEE_CLAIM_MODE" = "bankr" ]; then
-  log "Using Bankr for fee claim (v3 token)..."
+# Claim v3 fees if present (Bankr)
+if [ -n "$V3_USD" ] && [ "$(echo "$V3_USD" | awk '{print ($1 > 0) ? "yes" : "no"}')" = "yes" ]; then
+  log "Claiming v3 fees (\$$V3_USD) via Bankr..."
   CLAIM_RESULT=$(bankr_run "Claim ALL unclaimed Clanker creator fees for YARR ($YARR_TOKEN) on Base. After claiming, swap any non-WETH tokens to WETH. Tell me the total USD value claimed.")
   CLAIM_RESPONSE=$(echo "$CLAIM_RESULT" | jq -r '.response // ""' 2>/dev/null || echo "")
   log "Bankr claim response: $CLAIM_RESPONSE"
-  CLAIMED_USD=$(parse_usd "$CLAIM_RESPONSE")
+  V3_CLAIMED=$(parse_usd "$CLAIM_RESPONSE")
+  if [ -z "$V3_CLAIMED" ]; then V3_CLAIMED="$V3_USD"; fi
+  log "v3 claimed: \$$V3_CLAIMED"
+  CLAIMED_USD=$(echo "$CLAIMED_USD $V3_CLAIMED" | awk '{printf "%.2f", $1 + $2}')
 fi
 
 if [ -z "$CLAIMED_USD" ]; then
