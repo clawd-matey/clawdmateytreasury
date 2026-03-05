@@ -124,8 +124,38 @@ else
   # Wait for TX to settle
   sleep 8
   
+  # ── CRITICAL FIX: Transfer funds from Bankr wallet to treasury ──────────────
+  # Bankr claims TO the creator wallet (0x8b59a7e2...), not the treasury wallet.
+  # We need to transfer from Bankr's wallet to the treasury wallet that the
+  # swap script controls.
+  log "Transferring claimed funds from Bankr wallet to treasury..."
+  
+  if [ "$(echo "$CLAIMABLE_WETH > 0.001" | bc -l)" = "1" ]; then
+    log "Transferring ~$CLAIMABLE_WETH WETH to treasury ($TREASURY_WALLET)..."
+    TRANSFER_WETH=$(bankr "Transfer all WETH to $TREASURY_WALLET on Base. Execute the transfer." 2>&1 || true)
+    if echo "$TRANSFER_WETH" | grep -qiE "0x[a-f0-9]{64}"; then
+      log "✅ WETH transfer completed"
+    else
+      log "⚠️ WETH transfer may have failed: $(echo "$TRANSFER_WETH" | tail -2)"
+    fi
+    sleep 8
+  fi
+  
+  if [ "$(echo "$CLAIMABLE_YARR > 1000000" | bc -l)" = "1" ]; then
+    log "Transferring ~$CLAIMABLE_YARR YARR to treasury ($TREASURY_WALLET)..."
+    TRANSFER_YARR=$(bankr "Transfer all YARR to $TREASURY_WALLET on Base. Execute the transfer." 2>&1 || true)
+    if echo "$TRANSFER_YARR" | grep -qiE "0x[a-f0-9]{64}"; then
+      log "✅ YARR transfer completed"
+    else
+      log "⚠️ YARR transfer may have failed: $(echo "$TRANSFER_YARR" | tail -2)"
+    fi
+    sleep 8
+  fi
+  
+  # ── End transfer fix ─────────────────────────────────────────────────────────
+  
   # Sanity check: verify WETH balance before proceeding to swaps
-  log "Verifying WETH balance after claim..."
+  log "Verifying WETH balance after transfers..."
   WETH_BALANCE=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token WETH 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
   log "Current WETH balance: $WETH_BALANCE"
   
