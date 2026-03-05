@@ -402,6 +402,8 @@ fi
 
 log "═══ TREASURY BOT COMPLETE ═══"
 log "Claimed: $CLAIMED_WETH WETH + YARR (accumulated)"
+# Calculate total swapped (3 buys * SPLIT_USD each)
+SWAP_USD=$(echo "$SPLIT_USD" | awk '{printf "%.2f", $1 * 3}')
 log "YARR burned: $YARR_BURNED | WETH diversified: \$$SWAP_USD | WETH Reserve: \$$WETH_RESERVE"
 log "Tokens (RED, WBTC, CLAWD) sent to clawd-matey.eth"
 
