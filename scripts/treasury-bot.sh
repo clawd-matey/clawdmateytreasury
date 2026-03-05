@@ -102,7 +102,7 @@ BOUGHT=0
 FAILED=0
 TRANSFERRED=0
 
-# ── Step 3: Claim fees (trust bankr output) ───────────────────────────────────
+# ── Step 3: Claim fees (trust bankr output with sanity checks) ────────────────
 if [ "$DRY_RUN" = "true" ]; then
   log "[DRY RUN] Would claim fees from LpLockerv2"
   CLAIMED_WETH="$CLAIMABLE_WETH"
@@ -112,13 +112,36 @@ else
   CLAIM_RESULT=$(bankr "Claim all unclaimed fees from LpLockerv2 for YARR token ($YARR_TOKEN) on Base. Creator wallet is $CREATOR_WALLET. Execute the claim transaction and tell me the tx hash." 2>&1 || true)
   log "Claim result: $CLAIM_RESULT"
   
-  # Trust bankr's reported amounts (no balance verification)
-  CLAIMED_WETH="$CLAIMABLE_WETH"
-  CLAIMED_YARR="$CLAIMABLE_YARR"
-  log "Using bankr reported amounts: YARR=$CLAIMED_YARR, WETH=$CLAIMED_WETH"
+  # Check if claim TX was confirmed
+  CLAIM_TX=$(echo "$CLAIM_RESULT" | grep -oE "0x[a-f0-9]{64}" | head -1 || echo "")
+  if [ -z "$CLAIM_TX" ]; then
+    log "⚠️ No TX hash found in claim result — claim may have failed"
+    log "Checking if we should proceed anyway..."
+  else
+    log "✅ Claim TX: $CLAIM_TX"
+  fi
   
-  # Brief pause for tx to confirm before proceeding with swaps
-  sleep 5
+  # Wait for TX to settle
+  sleep 8
+  
+  # Sanity check: verify WETH balance before proceeding to swaps
+  log "Verifying WETH balance after claim..."
+  WETH_BALANCE=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token WETH 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
+  log "Current WETH balance: $WETH_BALANCE"
+  
+  # Edge case: if balance is 0 or very low, something's wrong
+  BALANCE_OK=$(echo "$WETH_BALANCE" | awk '{print ($1 > 0.001) ? "yes" : "no"}')
+  if [ "$BALANCE_OK" = "no" ]; then
+    log "⚠️ WETH balance too low ($WETH_BALANCE) — skipping swaps"
+    log "This could mean: claim failed, funds went elsewhere, or RPC issue"
+    CLAIMED_WETH="0"
+    CLAIMED_YARR="$CLAIMABLE_YARR"
+  else
+    # Trust bankr but cap at actual balance (use lesser of reported vs actual)
+    CLAIMED_WETH=$(echo "$CLAIMABLE_WETH $WETH_BALANCE" | awk '{print ($1 < $2) ? $1 : $2}')
+    CLAIMED_YARR="$CLAIMABLE_YARR"
+    log "Using claimed amounts: YARR=$CLAIMED_YARR, WETH=$CLAIMED_WETH (capped at balance)"
+  fi
 fi
 
 CLAIMED_USD=$(echo "$CLAIMED_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
@@ -271,9 +294,28 @@ else
 fi
 
 # ── Step 7: Buy portfolio tokens via uniswap-swap.py (direct, no LLM) ─────────
+
+# Edge case: skip buys if SPLIT_WETH is 0 or too small (< $1 worth)
+MIN_SWAP_WETH="0.0005"  # ~$1 at $2000/ETH
+SKIP_BUYS=$(echo "$SPLIT_WETH $MIN_SWAP_WETH" | awk '{print ($1 < $2) ? "yes" : "no"}')
+
+if [ "$SKIP_BUYS" = "yes" ]; then
+  log "⚠️ SPLIT_WETH ($SPLIT_WETH) below minimum ($MIN_SWAP_WETH) — skipping all buys"
+  log "This prevents failed swaps and wasted gas"
+  BOUGHT=0
+  FAILED=0
+fi
+
 buy_token() {
   local TOKEN_NAME=$1
   local WETH_AMOUNT=$2
+  
+  # Skip if amount is 0 or too small
+  local TOO_SMALL=$(echo "$WETH_AMOUNT $MIN_SWAP_WETH" | awk '{print ($1 < $2) ? "yes" : "no"}')
+  if [ "$TOO_SMALL" = "yes" ]; then
+    log "⚠️ Skipping $TOKEN_NAME buy — amount $WETH_AMOUNT below minimum"
+    return 1
+  fi
   
   log "Buying $TOKEN_NAME with $WETH_AMOUNT WETH via uniswap-swap.py..."
   local RESULT=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" swap --token-in WETH --token-out "$TOKEN_NAME" --amount "$WETH_AMOUNT" 2>&1)
@@ -296,6 +338,8 @@ buy_token() {
 if [ "$DRY_RUN" = "true" ]; then
   log "[DRY RUN] Would buy $SPLIT_WETH WETH (~\$$SPLIT_USD) each of RED, WBTC, CLAWD"
   log "[DRY RUN] Would keep $SPLIT_WETH WETH as reserve"
+elif [ "$SKIP_BUYS" = "yes" ]; then
+  log "Skipping all buys due to insufficient WETH"
 else
   log "Buying tokens via uniswap-swap.py (direct script, no LLM)..."
   
