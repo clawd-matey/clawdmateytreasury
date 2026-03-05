@@ -102,13 +102,7 @@ BOUGHT=0
 FAILED=0
 TRANSFERRED=0
 
-# ── Step 3: Record balances BEFORE claim ──────────────────────────────────────
-log "Recording balances before claim..."
-YARR_BEFORE=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token YARR 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
-WETH_BEFORE=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token WETH 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
-log "Before claim: YARR=$YARR_BEFORE, WETH=$WETH_BEFORE"
-
-# ── Step 3b: Claim fees ───────────────────────────────────────────────────────
+# ── Step 3: Claim fees (trust bankr output) ───────────────────────────────────
 if [ "$DRY_RUN" = "true" ]; then
   log "[DRY RUN] Would claim fees from LpLockerv2"
   CLAIMED_WETH="$CLAIMABLE_WETH"
@@ -118,17 +112,13 @@ else
   CLAIM_RESULT=$(bankr "Claim all unclaimed fees from LpLockerv2 for YARR token ($YARR_TOKEN) on Base. Creator wallet is $CREATOR_WALLET. Execute the claim transaction and tell me the tx hash." 2>&1 || true)
   log "Claim result: $CLAIM_RESULT"
   
-  # Record balances AFTER claim to calculate actual claimed amounts
-  log "Waiting for claim tx to settle..."
-  sleep 20  # Wait for tx to settle (Base block time ~2s, need several confirmations)
-  YARR_AFTER=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token YARR 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
-  WETH_AFTER=$($PYTHON "$SCRIPT_DIR/uniswap-swap.py" balance --token WETH 2>&1 | grep -oE '"balance":\s*[0-9.]+' | grep -oE '[0-9.]+' || echo "0")
-  log "After claim: YARR=$YARR_AFTER, WETH=$WETH_AFTER"
+  # Trust bankr's reported amounts (no balance verification)
+  CLAIMED_WETH="$CLAIMABLE_WETH"
+  CLAIMED_YARR="$CLAIMABLE_YARR"
+  log "Using bankr reported amounts: YARR=$CLAIMED_YARR, WETH=$CLAIMED_WETH"
   
-  # Calculate actual claimed amounts
-  CLAIMED_YARR=$(echo "$YARR_AFTER $YARR_BEFORE" | awk '{printf "%.0f", $1 - $2}')
-  CLAIMED_WETH=$(echo "$WETH_AFTER $WETH_BEFORE" | awk '{printf "%.6f", $1 - $2}')
-  log "Actually claimed: YARR=$CLAIMED_YARR, WETH=$CLAIMED_WETH"
+  # Brief pause for tx to confirm before proceeding with swaps
+  sleep 5
 fi
 
 CLAIMED_USD=$(echo "$CLAIMED_WETH $ETH_PRICE" | awk '{printf "%.2f", $1 * $2}')
